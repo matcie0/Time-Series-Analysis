@@ -1,0 +1,1273 @@
+---
+title: "Sprawozdanie 1"
+author: "Mateusz Cieślak, Michał Merta"
+date: "2025-11-23"
+output: 
+  pdf_document:
+    toc: true        
+    toc_depth: 3     
+    number_sections: true 
+toc: true
+lof: true
+lot: true
+
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{longtable}
+- \usepackage{array}
+- \usepackage{float}
+- \usepackage{graphicx}
+- \usepackage[OT4]{polski}
+- \usepackage[utf8]{inputenc}
+- \usepackage{amsmath}
+- \renewcommand{\contentsname}{Spis treści}
+- \renewcommand{\listfigurename}{Spis wykresów}
+- \renewcommand{\listtablename}{Spis tabel}
+- \renewcommand{\figurename}{Wykres}
+- \renewcommand{\tablename}{Tabela}
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  dev = "quartz_pdf",
+  fig.width = 6,
+  fig.height = 3,
+  out.extra='',
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE)
+knitr::opts_chunk$set(fig.pos = "H", out.extra = "", fig.align = "center", set.seed(123))
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE)
+```
+
+
+```{r biblioteki}
+library(TSAFBook)
+library(ggplot2)
+library(forecast)
+library(stats)
+library(tseries)   
+library(lmtest) 
+library(knitr)
+library(dplyr)
+library(patchwork)
+```
+
+\newpage
+
+# Zadanie 3 - Testowanie białoszumowści
+
+## Krótki opis zagadnienia
+W tym zadaniu zajmujemy się problemem weryfikacji hipotezy, że obserwowany szereg czasowy jest białym szumem. Biały szum rozumiemy jako sekwencję niezależnych zmiennych losowych. W szczególności, jego autokorelacja teoretyczna spełnia
+$\rho(h)=0 \quad \text{dla } h\neq 0.$
+  
+Celem pracy jest porównanie efektywności podejścia graficznego oraz formalnego, w oparciu o symulacje komputerowe. W szczególności zbadamy wpływ:
+
+* długości szeregu czasowego,
+* różnych rozkładów generujących białe szumy,
+* wyboru maksymalnego opóźnienia $h_{\max}$,
+* rozważenia szeregu nienależących do klasy i.i.d., takich jak procesy MA(1), błądzenie losowe, szeregi z trendem deterministycznym lub sezonowością.
+
+Wyniki symulacji pozwolą ocenić, w jakich warunkach poszczególne metody testowania białoszumowości są najbardziej wiarygodne i jakie ograniczenia praktyczne wiążą się z ich stosowaniem.
+
+
+## Opis eksperymentów
+
+W celu porównania metody graficznej weryfikacji hipotezy, że szereg czasowy jest białym szumem z testami formalnymi musimy najpierw dostosować metodę graficzną do wielokrotnych symulacji. W tym celu należy ją nieco sformalizować. W przedstawionej funkcji hipotezę zerową \(H_0\), że szereg jest białym szumem, odrzucamy, jeśli spełnione jest przynajmniej jedno z dwóch kryteriów:
+
+1. Kryterium pasa ufności dla autokorelacji:  
+   Dla każdej próbki wyznaczamy granicę ufności \(\text{CI} = \pm z_{1-\alpha/2} / \sqrt{n}\), gdzie \(n\) jest długością szeregu. Jeśli proporcja wartości próbkowej funkcji autokorelacji (ACF) znajdujących się poza tym pasmem przekracza poziom istotności \(\alpha\), uznajemy to za przesłankę do odrzucenia \(H_0\).
+
+2. Kryterium reguły 3 sigm:  
+   Wartości ACF, które przekraczają teoretyczny próg \(3 / \sqrt{n}\), traktujemy jako istotnie odstające. Wystąpienie przynajmniej jednej takiej wartości powoduje odrzucenie \(H_0\).
+
+Kod zaimplementowanej funkcji znajduje się poniżej:
+
+```{r wyswietlenie_funkcji_od_metody_graficznej, echo=TRUE, message=FALSE, warning=FALSE}
+test_white_noise_autocorrelation_graphic <- function(x, alpha = 0.05, hmax = NULL) 
+{
+  n <- length(x)
+  
+  #Przygotowanie argumentów dla ACF
+  acf_args <- list(x = x, plot = FALSE)
+  if (!is.null(hmax)) {
+    acf_args$lag.max <- hmax
+  }
+  
+  #Obliczenie ACF
+  acf_obj <- do.call(acf, acf_args)
+  acf_values <- acf_obj$acf[-1]
+  
+  #Kryterium Pasa Ufności (alpha)
+  ci <- qnorm(1 - alpha/2) / sqrt(n)
+  
+  outside_ci <- which(abs(acf_values) > ci)
+  prop_outside <- length(outside_ci) / length(acf_values)
+  reject_ci <- prop_outside > alpha
+  
+  #Kryterium Reguły 3 Sigm
+  
+  outlier_3sigma <- which(abs(acf_values) > 3 / sqrt(n))
+  reject_3sigma <- length(outlier_3sigma) > 0
+  
+  #Ogólna Decyzja
+  reject_H0_graphic <- reject_ci | reject_3sigma
+  
+  #Zwracamy pojedynczą wartość logiczną
+  return(list(
+      rejected = reject_H0_graphic,
+      reject_ci = reject_ci,
+      reject_3sigma = reject_3sigma
+  ))
+}
+```
+
+Oprócz tego używać będziemy wbudowanych funkcji do formalnych testów weryfikujących tą samą hipotezę, są to:
+
+**Test Box–Pierce’a**, który opiera się na statystyce testowej $Q$:
+
+$$Q = n \sum_{h=1}^{H} \hat{\rho}_h^2$$
+
+gdzie:
+
+* $n$ to długość szeregu czasowego.
+* $\hat{\rho}_h$ to próbkowy współczynnik autokorelacji dla opóźnienia $h$.
+* $H$ to maksymalne opóźnienie brane pod uwagę w teście.
+
+**Test Ljung–Box’a**, który jest powszechnie stosowaną modyfikacją testu Box–Pierce’a. Statystyka testowa $Q^*$ jest definiowana jako:
+
+$$Q^* = n(n+2) \sum_{h=1}^{H} \frac{\hat{\rho}_h^2}{n-h}$$
+W obu testach, decyzja o odrzuceniu hipotezy zerowej jest podejmowana na podstawie wartości $p$: jeżeli wartość $p$ jest mniejsza niż przyjęty poziom istotności $\alpha$, odrzucamy $H_0$ i wnioskujemy, że w szeregu występuje istotna autokorelacja. W symulacjach do wykonania tych testów wykorzystano wbudowaną w R funkcję Box.test.
+
+W celu porównania testów, będziemy wielokrotnie generować szeregi czasowe o różnym pochodzeniu oraz sprawdzać decyzję o odrzuceniu hipotezy zerowej dla każdego z nich. Wykorzystamy do tego wartość % odrzuceń dla każdej metody. W szczególności zwrócimy uwagę na:
+
+* **Różne rozkłady**: Badania obejmą biały szum generowany z różnych rozkładów: (Normalny ($N(0, 1)$, Binarny ($\mathbb{P}(X=1)=0.5$) oraz Wykładniczy ($\text{Exp}(1)$).
+
+* **Różną długość szeregów**: Porównane zostaną trzy długości szeregów: $n=25$, $n=100$ oraz $n=500$.
+
+* **Różny wybór maksymalnego opóźnienia $h_{\max}$**: Chociaż główna analiza zostanie przeprowadzona przy standardowym opóźnieniu, w celu oceny wpływu tego parametru na wyniki, zostaną rozważone też inne warianty maksymalnego opóźnienia.
+
+* **Przykłady szeregów czasowych innych niż szum i.i.d.**: W celu oceny mocy testów (zdolności do odrzucenia fałszywej $H_0$), uwzględnione zostaną szeregi wykazujące:
+    * Niewielką korelację: Model stacjonarny MA(1) ($\theta=0.5$).
+    * Niestacjonarność/silną korelację: Błądzenie Losowe.
+    * Strukturę Deterministyczną: Szum IID z Trendem Liniowym oraz Szum IID z Sezonowością.
+    * Szereg chaotyczny generowany przez mapowanie logistyczne.
+
+Symulacje zostaną przeprowadzone z przyjętym poziomem istotności **$\alpha = 0.05$**.
+
+## Wyniki
+
+```{r funkcje_pomocnicze, echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(654)
+# Funkcja do sprawdzania decyzji
+check_pregenerated_sample_decisions <- function(x, alpha = 0.05, hmax = NULL, type_label = "Szum IID (WN)") {
+  
+  n <- length(x)
+  
+  #Test Graficzny
+  res_graph <- test_white_noise_autocorrelation_graphic(x, alpha = alpha, hmax = hmax)
+  reject_graph <- res_graph$rejected
+  
+  #Testy Formalne
+  box_args <- list(x = x)
+  if (!is.null(hmax)) {
+    box_args$lag <- hmax
+  }
+  
+  # Box-Pierce
+  bp_args <- c(box_args, type = "Box-Pierce")
+  bp_res <- do.call(Box.test, bp_args)
+  reject_bp <- bp_res$p.value < alpha
+  
+  # Ljung-Box
+  lb_args <- c(box_args, type = "Ljung-Box")
+  lb_res <- do.call(Box.test, lb_args)
+  reject_lb <- lb_res$p.value < alpha
+  
+  #Tworzenie ramki danych wyników
+  results_df <- data.frame(
+    Test = c("Graficzny", "Box-Pierce", "Ljung-Box"),
+    `H0_odrzucona` = c(reject_graph, reject_bp, reject_lb),
+    `Wartość_p` = c(NA, bp_res$p.value, lb_res$p.value)
+  )
+  
+  # Zwracanie ramki danych
+  return(results_df)
+}
+
+generate_series <- function(n, type) {
+  if(type == "WN") {
+    x <- rnorm(n)
+  } else if(type == "Bin") {
+    x <- sample(c(0,1), n, replace = TRUE)
+  } else if(type == "MA1") {
+    # Dla MA(1)
+    x <- arima.sim(n=n, list(ma=0.5))
+  } else if(type == "RW") {
+    # Błądzenie losowe
+    x <- cumsum(rnorm(n))
+  } else if(type == "Trend") {
+    # Szum z trendem deterministycznym
+    WN <- rnorm(n)
+    delta <- 0.2
+    x <- WN + delta * (1:n)
+  } else if(type == "Sez") {
+    # Szum z sezonowością deterministyczną
+    WN <- rnorm(n)
+    okres <- 12
+    amplituda <- 3
+    sezonowosc <- amplituda * sin(2*pi*(1:n)/okres)
+    x <- WN + sezonowosc
+  } else if(type == "Logistic") {
+    # Mapowanie Logistyczne
+    r <- 4
+    x <- numeric(n)
+    x[1] <- runif(1)
+    for(i in 2:n) x[i] <- r*x[i-1]*(1 - x[i-1])
+  } else if(type == "Exp") {
+    # Szum i.i.d. z rozkładu wykładniczego
+    x <- rexp(n, rate = 1)
+  } else {
+    # Domyślnie: WN
+    x <- rnorm(n)
+  }
+  return(x)
+}
+
+plot_white_noise_diagnosis <- function(x, alpha = 0.05, hmax = NULL) {
+  n <- length(x)
+  
+  #ACF
+  acf_args <- list(x = x, plot = FALSE)
+  if (!is.null(hmax)) {
+    acf_args$lag.max <- hmax
+  }
+  acf_obj <- do.call(acf, acf_args)
+  
+  actual_hmax <- acf_obj$lag[length(acf_obj$lag)]
+  acf_values <- acf_obj$acf[-1]
+  lags <- acf_obj$lag[-1]
+  acf_df <- data.frame(lag = lags, acf = acf_values)
+  
+  # Pas ufności
+  ci <- qnorm(1 - alpha/2) / sqrt(n)
+  
+  # Wykrycie Outlierów
+  sd_acf <- 1/sqrt(n)
+  outlier_3sigma <- which(abs(acf_values) > 3*sd_acf)
+  
+  #Szereg czasowy
+  df_ts <- data.frame(t = 1:n, X = x)
+  p1 <- ggplot(df_ts, aes(x = t, y = X)) +
+    geom_line(color = "black") +
+    theme_minimal() +
+    labs(title = "Szereg czasowy", x = "t", y = "X[t]")
+
+  #Wykres ACF
+  p2 <- ggplot(acf_df, aes(x = lag, y = acf)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    geom_hline(yintercept = c(-ci, ci), color = "red", linetype = "dashed") +
+    # Dodanie punktów dla 3 sigma outliers
+    geom_point(data = acf_df[outlier_3sigma, ], aes(x = lag, y = acf), color = "orange", size = 2) + 
+    theme_minimal() +
+    labs(title = paste0("ACF (Max Lag:", actual_hmax, ")"), x = "Lag", y = "ACF")
+  
+  #Połączenie wykresów
+  combined_plot <- p1 + p2
+  
+  return(combined_plot)
+}
+```
+
+```{r symulacje, echo=FALSE, message=FALSE, warning=FALSE}
+library(xtable)
+
+simulate_white_noise_tests <- function(n = 200, k = 200, hmax = NULL,
+                                       type = "WN", alpha = 0.05) {
+  
+  reject_graph <- 0
+  reject_box <- 0
+  reject_ljung <- 0
+  
+  # Symulacja wielu prób
+  for(i in 1:k) {
+    x <- generate_series(n = n, type = type)
+    
+    #Test graficzny
+    res_graph_logic <- test_white_noise_autocorrelation_graphic(x, alpha = alpha, hmax = hmax)
+    if(res_graph_logic$rejected) reject_graph <- reject_graph + 1
+    
+    # Tworzymy argumenty dla Box.test
+    box_args_bp <- list(x = x, type = "Box-Pierce")
+    box_args_lb <- list(x = x, type = "Ljung-Box")
+    if (!is.null(hmax)) {
+      box_args_bp$lag <- hmax
+      box_args_lb$lag <- hmax
+    }
+    
+    #Box-Pierce
+    bp <- do.call(Box.test, box_args_bp)
+    if(bp$p.value < alpha) reject_box <- reject_box + 1
+    
+    #Ljung-Box
+    lb <- do.call(Box.test, box_args_lb)
+    if(lb$p.value < alpha) reject_ljung <- reject_ljung + 1
+  }
+  
+  #Wyniki ogólne-
+  results <- data.frame(
+    Test = c("Graficzny", "Box-Pierce", "Ljung-Box"),
+    Odrzucenia = c(reject_graph, reject_box, reject_ljung),
+    Proporcja_Odrzuceń = c(reject_graph/k, reject_box/k, reject_ljung/k)
+  )
+  
+  return(results)
+}
+```
+
+### Przykłady działania testów białoszumowości
+
+W tej części zadania przystępujemy do praktycznej weryfikacji hipotezy o białoszumowości na podstawie asymptotycznych własności autokorelacji na kilku przykładach. Celem jest wizualna ilustracja działania testu graficznego oraz porównanie jego mechanizmu z wynikami formalnych testów: Boxa–Pierce’a i Ljunga–Boxa. W metodzie graficznej sprawdzamy, czy nie jest zbyt dużo obserwacji wychodzących poza przyjęte normy oraz czy nie ma żadnej obserwacji istotnie wychodzącej.
+
+\begin{center}
+\large \textbf{Biały szum o rozkładzie normalnym}
+\end{center}
+
+```{r wykres_normalny, echo=FALSE, eval=TRUE, fig.cap="\\label{fig:wn_manual}Wykres szeregu czasowego oraz ACF dla szumu białego z rozkładu normalnego.", message=FALSE, warning=FALSE}
+# Parametry
+n_sample <- 100
+alpha_sample <- 0.05
+hmax_sample <- NULL
+
+# Generowanie szeregu (jednorazowa próbka z N(0, 1))
+wn_series <- rnorm(n_sample)
+
+# Generowanie i wyświetlanie wykresu
+plot_white_noise_diagnosis(x = wn_series, alpha = alpha_sample, hmax = hmax_sample)
+```
+
+```{r tabela_decyzje_wn, echo=FALSE, eval=TRUE, results='asis'}
+
+alpha_sample <- 0.05
+hmax_sample <- NULL
+
+full_decision_data <- check_pregenerated_sample_decisions(
+                                         x = wn_series, 
+                                         alpha = alpha_sample, 
+                                         hmax = hmax_sample)
+
+simple_decision_data <- full_decision_data[, c("Test", "H0_odrzucona")]
+
+colnames(simple_decision_data) <- c("Test", "H0 odrzucona")
+
+caption_text <- paste0("Decyzje testów biało-szumowości dla realizacji z rozkładu normalnego")
+tab_wn <- xtable(simple_decision_data, 
+                 caption = caption_text, 
+                 label = "tab:decyzjeWN",
+                 align = c("l", "l", "c"))
+print(tab_wn, 
+      type = "latex", 
+      table.placement = "H",
+      include.rownames = FALSE,
+      comment=FALSE)
+```
+
+Na podstawie Rysunku \ref{fig:wn_manual}, widać, że aż dwie wartości ACF są poza ustalonymi przedziałami. Z racji, że jest to aż 10% danych ACF, odrzucamy hipotezę zerową. W tabeli \ref{tab:decyzjeWN} widzimy, że sformalizowana wersja metody graficznej również odrzuca Hipotezę zerową, natomiast formalne testy statystyczne słusznie nie podejmują decyzji o jej odrzuceniu, zatem są odporne na tego typu fluktuacje.
+
+\newpage
+
+\begin{center}
+\large \textbf{Biały szum o rozkładzie wykładniczym}
+\end{center}
+
+```{r wykres_Exp, echo=FALSE, eval=TRUE, fig.cap="\\label{fig:exp}Wykres szeregu czasowego oraz ACF dla szumu białego z rozkładu wykładniczego", message=FALSE, warning=FALSE}
+# Generowanie szeregu
+exp_series <- generate_series(n = n_sample, type = "Exp")
+
+# Generowanie i wyświetlanie wykresu
+plot_white_noise_diagnosis(x = exp_series, alpha = alpha_sample, hmax = hmax_sample)
+```
+
+```{r tabela_decyzje_exp, echo=FALSE, eval=TRUE, results='asis', message=FALSE, warning=FALSE}
+library(xtable)
+
+full_decision_data_exp <- check_pregenerated_sample_decisions(
+                                         x = exp_series, 
+                                         alpha = alpha_sample, 
+                                         hmax = hmax_sample)
+
+simple_decision_data_exp <- full_decision_data_exp[, c("Test", "H0_odrzucona")]
+
+colnames(simple_decision_data_exp) <- c("Test", "H0 odrzucona")
+
+caption_text_exp <- paste0("Decyzje testów biało-szumowości dla realizacji szumu białego z rozkładu wykładniczego")
+
+tab_exp <- xtable(simple_decision_data_exp, 
+                  caption = caption_text_exp, 
+                  label = "tab:decyzjeEXP",
+                  align = c("l", "l", "c"))
+
+print(tab_exp, 
+      type = "latex", 
+      table.placement = "H",
+      include.rownames = FALSE,
+      comment=FALSE)
+```
+
+Na podstawie Rysunku \ref{fig:exp}, widać, że żadna wartość ACF nie jest poza ustalonymi przedziałami, zatem nie mamy podstaw do odrzucenia hipotezy zerowej. W tabeli \ref{tab:decyzjeEXP} widzimy, że sformalizowana wersja metody graficznej oraz formalne metody statystyczne również jej nie odrzucają.
+
+\newpage
+
+\begin{center}
+\large \textbf{Model MA(1)}
+\end{center}
+
+```{r wykres_MA1, echo=FALSE, eval=TRUE, fig.cap="\\label{fig:ma1}Wykres szeregu czasowego oraz ACF dla próbki modelu MA(1)", message=FALSE, warning=FALSE}
+ma1_series <- generate_series(n = n_sample, type = "MA1")
+
+plot_white_noise_diagnosis(x = ma1_series, alpha = alpha_sample, hmax = hmax_sample)
+```
+
+```{r tabela_decyzje_ma1, echo=FALSE, eval=TRUE, results='asis', message=FALSE, warning=FALSE}
+full_decision_data_ma1 <- check_pregenerated_sample_decisions(
+                                         x = ma1_series, 
+                                         alpha = alpha_sample, 
+                                         hmax = hmax_sample)
+
+simple_decision_data_ma1 <- full_decision_data_ma1[, c("Test", "H0_odrzucona")]
+
+colnames(simple_decision_data_ma1) <- c("Test", "H0 odrzucona")
+
+caption_text_ma1 <- paste0("Decyzje testów biało-szumowości dla realizacji modelu MA(1)")
+
+tab_ma1 <- xtable(simple_decision_data_ma1,
+                  caption = caption_text_ma1,
+                  label = "tab:decyzjeMA1",
+                  align = c("l","l","c"))
+
+print(tab_ma1,
+      type = "latex",
+      table.placement = "H",
+      include.rownames = FALSE,
+      comment=FALSE)
+```
+
+Na podstawie Rysunku \ref{fig:ma1}, widać, że jedna wartość ACF jest poza ustalonymi przedziałami, ale z racji, że jest ona "istotnie" wychodząca, odrzucamy hipotezę zerową. W tabeli \ref{tab:decyzjeMA1} widzimy, że sformalizowana wersja metody graficznej oraz formalne metody również odrzucają hipotezę H0.
+
+\newpage
+
+\begin{center}
+\large \textbf{Błądzenie losowe}
+\end{center}
+
+```{r wykres_RW, echo=FALSE, eval=TRUE, fig.cap="\\label{fig:rw}Wykres szeregu czasowego oraz ACF dla próbki błądzenia losowego", message=FALSE, warning=FALSE}
+
+rw_series <- generate_series(n = n_sample, type = "RW")
+
+plot_white_noise_diagnosis(x = rw_series, alpha = alpha_sample, hmax = hmax_sample)
+```
+
+```{r tabela_decyzje_rw, echo=FALSE, eval=TRUE, results='asis', message=FALSE, warning=FALSE}
+library(xtable)
+
+full_decision_data_rw <- check_pregenerated_sample_decisions(
+                                         x = rw_series, 
+                                         alpha = alpha_sample, 
+                                         hmax = hmax_sample)
+
+simple_decision_data_rw <- full_decision_data_rw[, c("Test", "H0_odrzucona")]
+
+colnames(simple_decision_data_rw) <- c("Test", "H0 odrzucona")
+
+caption_text_rw <- paste0("Decyzje testów biało-szumowości dla realizacji błądzenia losowego")
+
+tab_rw <- xtable(simple_decision_data_rw,
+                 caption = caption_text_rw,
+                 label = "tab:decyzjeRW",
+                 align = c("l","l","c"))
+
+print(tab_rw,
+      type = "latex",
+      table.placement = "H",
+      include.rownames = FALSE,
+      comment=FALSE)
+```
+
+Na podstawie Rysunku \ref{fig:rw}, widać, że większość wartość ACF jest poza ustalonymi przedziałami, ponadto kilka z nich jest "istotnie" wychodzących, z tego powodu z pewnością odrzucamy zatem hipotezę zerową. W tabeli \ref{tab:decyzjeRW} widzimy, że sformalizowana wersja metody graficznej oraz formalne metody statystyczne również podejmują decyzję o odrzuceniu hipotezy H0.
+
+\newpage
+
+\begin{center}
+\large \textbf{Biały szum + trend}
+\end{center}
+
+```{r wykres_Trend, echo=FALSE, eval=TRUE, fig.cap="\\label{fig:trend}Wykres szeregu czasowego oraz ACF dla próbki szumu białego z nałożonym trendem deterministycznym", message=FALSE, warning=FALSE}
+
+trend_series <- generate_series(n = n_sample, type = "Trend")
+
+plot_white_noise_diagnosis(x = trend_series, alpha = alpha_sample, hmax = hmax_sample)
+```
+
+```{r tabela_decyzje_trend, echo=FALSE, eval=TRUE, results='asis', message=FALSE, warning=FALSE}
+library(xtable)
+
+full_decision_data_trend <- check_pregenerated_sample_decisions(
+                                         x = trend_series, 
+                                         alpha = alpha_sample, 
+                                         hmax = hmax_sample)
+
+simple_decision_data_trend <- full_decision_data_trend[, c("Test", "H0_odrzucona")]
+
+colnames(simple_decision_data_trend) <- c("Test", "H0 odrzucona")
+
+caption_text_trend <- paste0("Decyzje testów biało-szumowości dla realizacji szumu białego z trendem deterministycznym")
+
+tab_trend <- xtable(simple_decision_data_trend,
+                    caption = caption_text_trend,
+                    label = "tab:decyzjeTREND",
+                    align = c("l","l","c"))
+
+print(tab_trend,
+      type = "latex",
+      table.placement = "H",
+      include.rownames = FALSE,
+      comment=FALSE)
+```
+
+Na podstawie Rysunku \ref{fig:trend}, widać, że wszystkie wartość ACF są poza ustalonymi przedziałami, ponadto wszystkie są "istotnie" wychodzące, zatem z pewnością odrzucamy zatem hipotezę zerową. W tabeli \ref{tab:decyzjeTREND} widzimy, że sformalizowana wersja metody graficznej oraz formalne metody również podejmują decyzję o odrzuceniu hipotezy H0.
+
+\newpage
+
+\begin{center}
+\large \textbf{Biały szum + Sezonowość}
+\end{center}
+
+```{r wykres_Sez, echo=FALSE, eval=TRUE, fig.cap="\\label{fig:sez}Wykres szeregu czasowego oraz ACF dla próbki szumu białego z nałożoną sezonowością.", message=FALSE, warning=FALSE}
+
+sez_series <- generate_series(n = n_sample, type = "Sez")
+
+plot_white_noise_diagnosis(x = sez_series, alpha = alpha_sample, hmax = hmax_sample)
+```
+
+```{r tabela_decyzje_sez, echo=FALSE, eval=TRUE, results='asis', message=FALSE, warning=FALSE}
+library(xtable)
+
+full_decision_data_sez <- check_pregenerated_sample_decisions(
+                                         x = sez_series, 
+                                         alpha = alpha_sample, 
+                                         hmax = hmax_sample)
+
+simple_decision_data_sez <- full_decision_data_sez[, c("Test", "H0_odrzucona")]
+
+colnames(simple_decision_data_sez) <- c("Test", "H0 odrzucona")
+
+caption_text_sez <- paste0("Decyzje testów biało-szumowości dla realizacji szumu białego z sezonowością")
+
+tab_sez <- xtable(simple_decision_data_sez,
+                  caption = caption_text_sez,
+                  label = "tab:decyzjeSEZ",
+                  align = c("l","l","c"))
+
+print(tab_sez,
+      type = "latex",
+      table.placement = "H",
+      include.rownames = FALSE,
+      comment=FALSE)
+```
+
+Na podstawie Rysunku \ref{fig:sez}, widać, że duża część wartości ACF jest poza ustalonymi przedziałami, zatem odrzucamy hipotezę zerową. W tabeli \ref{tab:decyzjeSEZ} widzimy, że sformalizowana wersja metody graficznej oraz formalne metody również podejmują decyzję o odrzuceniu hipotezy H0.
+
+\newpage
+
+### Porównanie metody graficznej i formalnych testów statystycznych
+
+W tej części zadania zajmiemy się porównaniem metod testowania białoszumowości. W tym celu przeprowadzimy wielokrotne symulacje dla różnych przypadków pochodzenia danych oraz dla różnych parametrów. Dla odpowiedniej analizy każda symulacja zostanie przeprowadzona 1000 razy.
+ 
+ **Różne rozkłady**
+ 
+W pierwszej kolejności sprawdzimy jak zachowują się testy dla białego szumu w zależności od rozkładu, z którego pochodzi. W wszystkich przypadkach przyjmujemy n=100 oraz nie ustalamy hmax (pozwalamy na ustalenie go wbudowanym funkcjom).
+
+```{r symulacja-wyniki-wszystkie-rozkłady, echo=FALSE, eval=TRUE, results='markup', message=FALSE, warning=FALSE}
+
+# Szum Biały (Normalny)
+results_df_WN <- simulate_white_noise_tests(n = 200, k = 1000, type = "WN", alpha = 0.05)
+# Szum Biały (Wykładniczy)
+results_df_Exp <- simulate_white_noise_tests(n = 200, k = 1000, type = "Exp", alpha = 0.05)
+# Szum Biały (Binarny)
+results_df_Bin <- simulate_white_noise_tests(n = 200, k = 1000, type = "Bin", alpha = 0.05)
+
+#PRZETWARZANIE I ŁĄCZENIE DANYCH
+# Zachowujemy tylko kolumny "Test" i "Proportion" i zmieniamy nazwę kolumny proporcji
+# Normalny
+proportions_WN <- results_df_WN[, c("Test", "Proporcja_Odrzuceń")]
+colnames(proportions_WN)[2] <- "Normalny"
+
+# Wykładniczy
+proportions_Exp <- results_df_Exp[, "Proporcja_Odrzuceń", drop = FALSE]
+colnames(proportions_Exp) <- "Wykładniczy"
+
+# Binarny
+proportions_Bin <- results_df_Bin[, "Proporcja_Odrzuceń", drop = FALSE]
+colnames(proportions_Bin) <- "Binarny"
+
+# Łączenie w jedną ramkę danych
+final_comparison_df <- cbind(proportions_WN, proportions_Exp, proportions_Bin)
+```
+
+```{r tabela-porownanie-rozkłady, echo=FALSE, eval=TRUE, results='asis', message=FALSE, warning=FALSE}
+tab_comparison <- xtable(
+  final_comparison_df,
+  digits = c(0, 0, 3, 3, 3),
+  row.names = FALSE,
+  caption = "Proporcja odrzuceń hipotezy $H_0$ dla białego szumu, w zależności od rozkładu",
+  label = "tab:porownanie_rozkładow"
+)
+
+# Nadanie czytelniejszych nazw kolumn
+align_settings <- c("l", "l", "c", "c", "c")
+colnames(tab_comparison) <- c("Test", "Normalny", "Wykładniczy", "Binarny")
+
+print(tab_comparison,
+      type = "latex",
+      include.rownames = FALSE,
+      table.placement = "H",
+      comment = FALSE,
+      align = align_settings)
+```
+
+Jak widzimy w tabeli \ref{tab:porownanie_rozkładow}, Metoda graficzna niezależnie od rozkładu bardzo często odrzuca hipotezę zerową w około 26% przypadków (pomimo jej prawdziwości). Znacznie lepiej radzą sobie z tym testy formalne, które odrzucają ją tylko w okolicach poziomu istotności, tzn 5%.
+
+ **Różne n**
+
+Teraz sprawdzimy, jak reagują testy na różne długości szeregów. W każdym z przypadków rozważymy biały szum pochodzący z rozkładu normalnego oraz domyślne hmax.
+
+```{r symulacja-wyniki-wszystkie-dlugosci, echo=FALSE, eval=TRUE, results='markup', message=FALSE, warning=FALSE}
+
+# n=20 (Krótki szereg)
+results_df_n20 <- simulate_white_noise_tests(n = 20, k = 1000, type = "WN", alpha = 0.05, hmax = NULL)
+# n=100 (Średnia długość)
+results_df_n100 <- simulate_white_noise_tests(n = 100, k = 1000, type = "WN", alpha = 0.05, hmax = NULL)
+# n=500 (Długi szereg)
+results_df_n500 <- simulate_white_noise_tests(n = 500, k = 1000, type = "WN", alpha = 0.05, hmax = NULL)
+
+#PRZETWARZANIE I ŁĄCZENIE DANYCH
+
+# n=20
+proportions_n20 <- results_df_n20[, c("Test", "Proporcja_Odrzuceń")]
+colnames(proportions_n20)[2] <- "n=20"
+
+# n=100
+proportions_n100 <- results_df_n100[, "Proporcja_Odrzuceń", drop = FALSE]
+colnames(proportions_n100) <- "n=100"
+
+# n=500
+proportions_n500 <- results_df_n500[, "Proporcja_Odrzuceń", drop = FALSE]
+colnames(proportions_n500) <- "n=500"
+
+# Łączenie w jedną ramkę danych
+final_comparison_n <- cbind(proportions_n20, proportions_n100, proportions_n500)
+```
+
+```{r tabela-porownanie-dlugosci, echo=FALSE, eval=TRUE, results='asis', message=FALSE, warning=FALSE}
+
+tab_comparison_n <- xtable(
+  final_comparison_n,
+  digits = c(0, 0, 3, 3, 3),
+  row.names = FALSE,
+  caption = "Proporcja odrzuceń hipotezy $H_0$ dla białego szumu o różnej długości szeregu ($n$)",
+  label = "tab:porownanie_dlugosci"
+)
+
+align_settings <- c("l", "l", "c", "c", "c")
+colnames(tab_comparison_n) <- c("Test", "n=20 (Krótki)", "n=100 (Średni)", "n=500 (Długi)")
+
+print(tab_comparison_n,
+      type = "latex",
+      include.rownames = FALSE,
+      table.placement = "H",
+      comment = FALSE,
+      align = align_settings)
+```
+
+Jak widzimy, dla dużych n test graficzny coraz częściej niesłusznie odrzuca hipotezę H0. Jest to prawdopodobnie spowodowane faktem, że dla dużych n jest coraz to więcej wartości ACF do analizy, przez co częściej któraś z nich może przez przypadek istotnie wykroczyć poza dopuszczany przedział. Natomiast dwa formalne testy statystyczne wykazują się dużą stabilnoscią dla dowolnych n.
+
+**Różne hmax**
+
+Teraz przetestujemy, jak zachowują się funkcje dla różnych dobranych maksymalnych wartości $h_{\max}$. W każdym z przypadków analizować będziemy szereg długości $n=100$ typu biały szum o rozkładzie normalnym. Sprawdzimy:
+
+- domyślne $h_{\max}$ (czyli $10 \cdot \log_{10} n$),  
+- $h_{\max} = 25$ (czyli $n/4$),  
+- $h_{\max} = 10$.
+
+
+```{r symulacja-wyniki-wszystkie-hmax, echo=FALSE, eval=TRUE, results='markup', message=FALSE, warning=FALSE}
+
+# Domyślne hmax
+results_df_hmax_def <- simulate_white_noise_tests(n = 100, k = 1000, type = "WN", alpha = 0.05, hmax = NULL)
+# hmax = 25
+results_df_hmax_25 <- simulate_white_noise_tests(n = 100, k = 1000, type = "WN", alpha = 0.05, hmax = 25)
+# hmax = 10
+results_df_hmax_10 <- simulate_white_noise_tests(n = 100, k = 1000, type = "WN", alpha = 0.05, hmax = 10)
+
+proportions_hmax_def <- results_df_hmax_def[, c("Test", "Proporcja_Odrzuceń")]
+colnames(proportions_hmax_def)[2] <- "Domyślne"
+
+# hmax = 25
+proportions_hmax_25 <- results_df_hmax_25[, "Proporcja_Odrzuceń", drop = FALSE]
+colnames(proportions_hmax_25) <- "hmax=25"
+
+# hmax = 10
+proportions_hmax_10 <- results_df_hmax_10[, "Proporcja_Odrzuceń", drop = FALSE]
+colnames(proportions_hmax_10) <- "hmax=10"
+
+final_comparison_hmax <- cbind(proportions_hmax_def, proportions_hmax_25, proportions_hmax_10)
+```
+
+```{r tabela-porownanie-hmax, echo=FALSE, eval=TRUE, results='asis', message=FALSE, warning=FALSE}
+
+tab_comparison_hmax <- xtable(
+  final_comparison_hmax,
+  digits = c(0, 0, 3, 3, 3),
+  row.names = FALSE,
+  caption = "Proporcja odrzuceń hipotezy $H_0$ dla różnych wartości maksymalnego opóźnienia ($h_{\\max}$)",
+  label = "tab:porownanie_hmax"
+)
+
+# Nadanie czytelniejszych nazw kolumn
+align_settings <- c("l", "l", "c", "c", "c")
+colnames(tab_comparison_hmax) <- c("Test", "Domyślne", "$h_{\\max}=25$", "$h_{\\max}=10$")
+
+print(tab_comparison_hmax,
+      type = "latex",
+      include.rownames = FALSE,
+      table.placement = "H",
+      comment = FALSE,
+      align = align_settings,
+      sanitize.colnames.function = identity) # Zachowanie LaTeX-a w nazwach kolumn
+```
+
+Jak widać w tabeli \ref{tab:porownanie_hmax} test graficzny radzi sobie najlepiej dla domyślnego hmax. Natomiast testy formalne lekko tracą stabilność dla hmax innych niż domyślne (wyniki odbiegają od poziomu istotności).
+
+**Szeregi inne niż biały szum**
+
+\underline{Model MA(1)}
+
+```{r tabela-symulacja-ma1, echo=FALSE, eval=TRUE, results='asis', message=FALSE, warning=FALSE}
+results_df_ma1 <- simulate_white_noise_tests(n = 100, k = 1000, type = "MA1", alpha = 0.05, hmax = NULL)
+
+tab_results_ma1 <- xtable(
+  results_df_ma1,
+  digits = c(0, 0, 0, 3), 
+  row.names = FALSE,
+  caption = "Proporcja odrzuceń hipotezy $H_0$ dla MA(1).",
+  label = "tab:porownanie_testow_ma1"
+)
+
+print(tab_results_ma1,
+      type = "latex",
+      include.rownames = FALSE,
+      table.placement = "H", 
+      comment = FALSE)
+```
+
+jak widać w Tabeli \ref{tab:porownanie_testow_ma1} Formalne metody prawie zawsze wykrywają brak białego szumu, pomio wysokiej autokorelacji tylko dla pierwszego ACF. Metoda graficzna również jest cechuje się natomiast nieco niższą skutecznością.
+
+\underline{Szum losowy + trend}
+
+```{r tabela-symulacja-trend, echo=FALSE, eval=TRUE, results='asis', message=FALSE, warning=FALSE}
+
+results_df_trend <- simulate_white_noise_tests(n = 100, k = 1000, type = "Trend", alpha = 0.05, hmax = NULL)
+
+tab_results_trend <- xtable(
+  results_df_trend,
+  digits = c(0, 0, 0, 3), 
+  row.names = FALSE,
+  caption = "Proporcja odrzuceń hipotezy $H_0$ dla szeregu z trendem deterministycznym",
+  label = "tab:porownanie_testow_trend"
+)
+
+print(tab_results_trend,
+      type = "latex",
+      include.rownames = FALSE,
+      table.placement = "H", 
+      comment = FALSE)
+```
+
+Jak widać w Tabeli \ref{tab:porownanie_testow_trend} każda z metod z 100% skutecznością odrzuca hipotezę zerową, co jest logiczne w przypadku występującego istotnego trendu.
+
+\underline{Błądzenie losowe}
+
+```{r tabela-symulacja-rw, echo=FALSE, eval=TRUE, results='asis', message=FALSE, warning=FALSE}
+results_df_rw <- simulate_white_noise_tests(n = 100, k = 1000, type = "RW", alpha = 0.05, hmax = NULL)
+
+tab_results_rw <- xtable(
+  results_df_rw,
+  digits = c(0, 0, 0, 3), 
+  row.names = FALSE,
+  caption = "Proporcja odrzuceń hipotezy $H_0$ dla błądzenia losowego",
+  label = "tab:porownanie_testow_rw"
+)
+
+print(tab_results_rw,
+      type = "latex",
+      include.rownames = FALSE,
+      table.placement = "H", 
+      comment = FALSE)
+```
+
+Jak widać w Tabeli \ref{tab:porownanie_testow_rw} ponownie każda z metod z 100% skutecznością odrzuca hipotezę zerową. W przypadku błądzenia losowego autokorelacja jest wysoka i wynik ten jest zgodny z teorią.
+
+\underline{Szum losowy + sezonowość}
+
+```{r tabela-symulacja-sez, echo=FALSE, eval=TRUE, results='asis', message=FALSE, warning=FALSE}
+
+results_df_sez <- simulate_white_noise_tests(n = 100, k = 1000, type = "Sez", alpha = 0.05, hmax = NULL)
+
+tab_results_sez <- xtable(
+  results_df_sez,
+  digits = c(0, 0, 0, 3), 
+  row.names = FALSE,
+  caption = "Proporcja odrzuceń hipotezy $H_0$ dla szeregu z sezonowością",
+  label = "tab:porownanie_testow_sez"
+)
+
+print(tab_results_sez,
+      type = "latex",
+      include.rownames = FALSE,
+      table.placement = "H", 
+      comment = FALSE)
+```
+
+Ponownie w Tabeli \ref{tab:porownanie_testow_sez} zauważamy 100% skuteczność każdej z metod. Sezonowość zgodnie z teorią ocno wpływa na wartości ACF, co powoduje słuszne odrzucanie hipotezy zerowej.
+
+\underline{mapowanie logistyczne}
+
+```{r tabela-symulacja-logistic, echo=FALSE, eval=TRUE, results='asis', message=FALSE, warning=FALSE}
+results_df_logistic <- simulate_white_noise_tests(n = 100, k = 1000, type = "Logistic", alpha = 0.05, hmax = NULL)
+
+tab_results_logistic <- xtable(
+  results_df_logistic,
+  digits = c(0, 0, 0, 3), 
+  row.names = FALSE,
+  caption = "Proporcja odrzuceń hipotezy $H_0$ dla mapowania logistycznego",
+  label = "tab:porownanie_testow_logistic"
+)
+
+print(tab_results_logistic,
+      type = "latex",
+      include.rownames = FALSE,
+      table.placement = "H", 
+      comment = FALSE)
+```
+
+W tym przypadku dane pochodzą z rozkładu w teorii deterministycznego, jednak bardzo mocno przypominającego biały szym. Z tego powodu wyniki w Tabeli \ref{tab:porownanie_testow_logistic} są podobne do wyników z zwykłego białego szumu.
+
+## Podsumowanie
+Na podstawie powyższej analizy można śmiało wysunąć wniosek, że formalne testy statystyczne są znacznie skuteczniejsze w przypadku testowania białoszumowości, niż metoda graficzna. Dodatkowo można wysnuć wnioski, że:
+
+* Testy formalne odrzucają hipotezę zerową w przybliżeniu zgodnym z założonym poziomem istotności $\alpha$, podczas gdy metoda graficzna jest subiektywna i nie gwarantuje kontrolowanego błędu pierwszego rodzaju.
+* Formalne testy pozostają stabilne niezależnie od długości szeregu czasowego, natomiast metoda graficzna staje się nadmiernie czuła przy dużych próbach, co może prowadzić do błędnych wniosków.
+
+\newpage
+
+# Zadanie 4 - Dekompozycja szeregów czasowych - eliminacja trendu i sezonowości
+
+
+## Wstęp 
+
+Cel zadania: Zastosowanie i porównanie wybranych metod dekompozycji, w kontekście ich zastosowania do eliminacji trendu i sezonowości.
+W niniejszym sprawozdaniu będziemy przeprowadzać analizę sezonowości szeregu `bezrobocie` z biblioteki `TSAFBook`.
+
+## Metody graficzne
+
+```{r wykres_autoplot, fig.cap = "\\label{fig:wykres_glowny}Wykres przedstawiający szereg czasowy bezrobocia"}
+autoplot(bezrobocie) +
+  ggtitle("Szereg czasowy: bezrobocie") +
+  xlab("Czas") + ylab("Wartość (%)") +
+  theme_minimal()
+```
+
+Na wykresie \ref{fig:wykres_glowny} nie obserwujemy jednolitego trendu. W pierwszych latach poziom bezrobocia rośnie, następnie znacznie maleje, a w końcowym okresie ponownie rośnie. Oznacza to, że szereg wykazuje zmienny, nieliniowy charakter.
+
+
+```{r wykres_seasonplot, fig.cap = "\\label{fig:wykres_sezonowy}Wykres sezonowy dla bezrobocia"}
+ggseasonplot(bezrobocie, year.labels = TRUE) +
+  ggtitle("Wykres sezonowy dla bezrobocia") +
+  ylab("Bezrobocie")
+
+```
+
+Wykres \ref{fig:wykres_sezonowy} pozwala zauważyć, że każdego roku bezrobocie zmienia się bardzo podobnie, jest wyższe od grudnia do marca i szczególnie niższe od czerwca do października. Jest to zgodne z cyklem zapotrzebowania na pracę w sektorach silnie zależnych od pory roku, takich jak rolnictwo, ogrodnictwo czy turystyka, które zimą ograniczają działalność.
+
+
+
+```{r wykres_subseriesplot, fig.cap = "\\label{fig:wykres_sub}Wykres podszeregów dla bezrobocia"}
+ggsubseriesplot(bezrobocie) +
+  ggtitle("Wykres podszeregów (subseries) dla bezrobocia") +
+  ylab("Bezrobocie")
+```
+
+Na \ref{fig:wykres_sub} trend w obrębie każdego miesiąca był podobny. Ponownie widzimy, że w okresie zimowym bezrobocie było wyższe.
+
+```{r reszty, fig.cap = "\\label{fig:wykres_reszt}Wykres reszt"}
+dekompozycja <- decompose(bezrobocie)
+reszty <- dekompozycja$random
+autoplot(reszty) + ggtitle("Reszty po dekompozycji") + ylab("Reszty")
+
+```
+
+Na wykresie reszt \ref{fig:wykres_reszt} amplituda wahań przez cały okres utrzymuje się na stabilnym poziomie około ±0.25, co wskazuje na jednorodność wariancji.
+W jednym krótkim fragmencie szeregu widoczny jest gwałtowny wzrost rozrzutu (od –0.75 do 0.75), który ma charakter pojedynczej anomalii, a nie trwałej zmiany wariancji.
+
+## Metody dekompozycji 
+
+### Dekompozycja na podstawie ruchomej średniej
+
+```{r dekomp_addytywna,  fig.cap = "\\label{fig:dekomp_add} Wykres dekompozycji addytywnej szeregu czasowego"}
+# Dekompozycja addytywna
+dekomp.add <- decompose(bezrobocie, type = "additive")
+autoplot(dekomp.add)
+```
+
+```{r dekomp_fit_add, fig.cap = "\\label{fig:wykres_reszt_add} Dopasowanie addytywnego modelu dekompozycji"}
+# poszczególne składowe
+dekomp.add.trend      <- dekomp.add$trend
+dekomp.add.sezonowosc <- dekomp.add$seasonal
+dekomp.add.ind.sezon  <- dekomp.add$figure
+dekomp.add.reszty     <- dekomp.add$random
+
+# sprawdzamy dopasowanie modelu dekompozycji
+dekomp.add.fit <- dekomp.add.trend + dekomp.add.sezonowosc
+autoplot(cbind(bezrobocie, dekomp.add.fit), ylab="")
+# Pytania:
+# Czy otrzymujemy dobre dopasowanie powyższego modelu dekompozycji? 
+# Jak możemy poprawić jakość dopasowania?
+```
+
+Dekompozycja na podstawie ruchomej średniej w wersji addytywnej dopasowuje się bardzo dobrze do oryginalnego szeregu.
+
+
+```{r dekomp_multiplikatywna, fig.cap = "\\label{fig:dekomp_mult} Wykres dekompozycji multiplikatywnej szeregu czasowego"}
+# Dekompozycja multiplikatywna
+dekomp.mult <- decompose(bezrobocie, type = "multiplicative")
+autoplot(dekomp.mult)
+```
+
+```{r dekomp_fit_mult, fig.cap = "\\label{fig:wykres_reszt_mult} Dopasowanie multiplikatywnego modelu dekompozycji"}
+dekomp.mult.fit <- dekomp.mult$trend * dekomp.mult$seasonal
+autoplot(cbind(bezrobocie, dekomp.mult.fit), ylab="")
+```
+
+Dekompozycja na podstawie ruchomej średniej w wersji multiplikatywnej może lepiej oddawać dynamikę, jeśli amplituda sezonowa rośnie lub maleje. W tym przypadku amplituda jest stała, więc ten model nie poprawia dopasowania. Co więcej, dopasowanie nawet trochę się pogorszyło, widać to w szczególności gdy porównamy \ref{fig:dekomp_add} i \ref{fig:dekomp_mult}, ponieważ na \ref{fig:dekomp_mult} amplituda reszt się zwiększyła i widać, że ma wyraźną strukturę.
+
+### Dekompozycja na podstawie modelu regresji
+
+```{r dekomp_regr_123, fig.cap = "\\label{fig:wykres_regr_123} Dekompozycja na podstawie modelu regresji"}
+# Dekompozycja na podstawie modelu regresji: trend liniowy + sezonowość
+tslm.1 <- tslm(bezrobocie ~ trend + season)
+ggtsdisplay(residuals(tslm.1), main = "Reszty losowe dla trendu liniowego")
+
+# Dekompozycja zlogarytmowanych danych na podstawie modelu regresji: trend liniowy + sezonowość
+log.tslm.2 <- tslm(bezrobocie ~ season + trend, lambda = 0)
+ggtsdisplay(residuals(log.tslm.2), main = "Reszty losowe dla zlogarytmowanego trendu liniowego")
+
+# Dekompozycja zlogarytmowanych danych na podstawie modelu regresji: trend kwadratowy + sezonowość
+log.tslm.3 <- tslm(bezrobocie ~ season + trend + I(trend ^ 2), lambda = 0)
+ggtsdisplay(residuals(log.tslm.3), main = "Reszty losowe dla zlogarytmowanego trendu kwadratowego")
+
+```
+
+```{r dekomp_regr_porownanie_123, fig.cap = "\\label{fig:porownanie_regr_123} Porównanie dopasowań"}
+# porównanie modeli dekompozycji
+autoplot(bezrobocie, main="Porównanie modeli dekompozycji", series="oryginalny szereg", lwd=1) + 
+  autolayer(fitted(tslm.1), lwd=0.5, series="trend liniowy + sezonowość") + 
+  autolayer(fitted(log.tslm.2), lwd=0.5, series="trend liniowy + sezonowość (dane zlog.)") +
+  autolayer(fitted(log.tslm.3), lwd=0.5, series="trend kwadartowy + sezonowość (dane zlog.)")
+
+```
+
+Na wykresie \ref{fig:porownanie_regr_123} widać, że trend liniowy dobrze oddaje ogólny spadek bezrobocia w czasie, ale nie odwzorowuje lokalnych wzrostów i spadków. Wszystkie modele dobrze uwzględniają sezonowość, widać, że jest stabilna i powtarzalna niezależnie od tego czy użyto transformacji logarytmicznej. Dodanie trendu kwadratowego nie daje znacząco lepszego dopasowania.
+
+```{r dekomp_regr_45, fig.cap = "\\label{fig:wykres_regr_45} Dekompozycja na podstawie modelu regresji dla wyższych stopni"}
+
+log.tslm.4 <- tslm(bezrobocie ~ season + trend + I(trend ^ 2) + I(trend ^ 3), lambda = 0)
+ggtsdisplay(residuals(log.tslm.4), main = "Reszty losowe dla zlogarytmowanego trendu sześciennego")
+
+log.tslm.5 <- tslm(bezrobocie ~ season + trend + I(trend ^ 2) + I(trend ^ 3) + I(trend ^ 4), lambda = 0)
+ggtsdisplay(residuals(log.tslm.5), main = "Reszty losowe dla zlogarytmowanego trendu czwartego stopnia")
+```
+
+```{r dekomp_regr_porownanie_45, fig.cap = "\\label{fig:porownanie_regr_45} Porównanie dopasowań dla wyższych stopni"}
+autoplot(bezrobocie, main="Porównanie modeli dekompozycji", series="oryginalny szereg", lwd=1) + 
+  autolayer(fitted(log.tslm.4), lwd=0.5, series="trend sześcienny + sezonowość (dane zlog.)") +
+  autolayer(fitted(log.tslm.5), lwd=0.5, series="trend czwartego stopnia + sezonowość (dane zlog.)") 
+
+```
+
+Używając wielomianów stopnia 3 i 4, możemy znacznie lepiej dopasować modele do trendu, linie zaczynają przypominać krzywą.
+
+W tym momencie warto zauważyć, że w każdym z modeli, niezależnie od stopnia wielomianu, wykresy ACF \ref{fig:wykres_regr_123} i \ref{fig:wykres_regr_45} przedstawiają bardzo dużą autokorelację. Oznacza to, że wielomian jest nieodpowiednim narzędziem do tych danych, bo nie modeluje ich autokorelacji. 
+
+### Dekompozycja STL oparta na metodzie loess
+
+
+W tej metodzie możemy poeksperymentować z parametrami `s.window` i `t.window` tak aby reszty były jak najmniejsze.
+
+
+Najpierw dla domyślnych parametrów. 
+
+```{r dekomp_stl, fig.cap = "\\label{fig:stl_domyslne} Dekompozycja STL dla domyślnych parametrów"}
+
+### Dekompozycja STL: s.window="periodic", t.window - domyślne'
+dekomp.stl.1 <- stl(bezrobocie,  s.window="periodic")
+autoplot(dekomp.stl.1) + ggtitle('Parametry: s.window="periodic", t.window - domyślne')
+
+# Składowe
+trend      <- trendcycle(dekomp.stl.1)
+sezonowosc <- seasonal(dekomp.stl.1)
+reszty     <- remainder(dekomp.stl.1)
+
+# wykres składowych
+autoplot(cbind(trend,sezonowosc, reszty), ylab="skladowe dekompozycji STL")
+autoplot(cbind(trend,sezonowosc, reszty), facet=TRUE, ylab="skladowe dekompozycji STL")
+
+```
+
+Teraz zobaczmy jak wygląda dopasowanie gdy zmienimy `s.window` i `t.window`.
+
+```{r 7b, fig.cap = "\\label{fig:stl_7b} Dekompozycja STL dla s.window=7, t.window - domyślne"}
+### Dekompozycja STL: s.window=7, t.window - domyślne
+dekomp.stl.2 <- stl(bezrobocie,  s.window=7) 
+autoplot(dekomp.stl.2) + ggtitle('Parametry: s.window=7, t.window - domyślne')
+
+```
+
+```{r 13b, fig.cap = "\\label{fig:stl_13b} Dekompozycja STL dla s.window=13, t.window - domyślne"}
+
+### Dekompozycja STL: s.window=13, t.window - domyślne'
+dekomp.stl.3 <- stl(bezrobocie,  s.window=13) 
+autoplot(dekomp.stl.3) + ggtitle('Parametry: s.window=13, t.window - domyślne')
+
+```
+
+
+```{r 1321, fig.cap = "\\label{fig:stl_1321} Dekompozycja STL dla s.window=13, t.window=21"}
+### 'Dekompozycja STL: s.window=13, t.window=21'
+dekomp.stl.6 <- stl(bezrobocie, s.window=13, t.window=21) 
+autoplot(dekomp.stl.6) + ggtitle('Parametry: s.window=13, t.window=21')
+
+```
+
+```{r 137, fig.cap = "\\label{fig:stl_137} Dekompozycja STL dla s.window=13, t.window=7"}
+### 'Dekompozycja STL: s.window=13, t.window=7
+dekomp.stl.4 <- stl(bezrobocie, s.window=13, t.window=7) 
+autoplot(dekomp.stl.4) + ggtitle('Parametry: s.window=13, t.window=7')
+
+```
+
+```{r 77, fig.cap = "\\label{fig:stl_77} Dekompozycja STL dla s.window=7, t.window=7"}
+### 'Dekompozycja STL: s.window=13, t.window=7
+dekomp.stl.4 <- stl(bezrobocie, s.window=7, t.window=7) 
+autoplot(dekomp.stl.4) + ggtitle('Parametry: s.window=7, t.window=7')
+
+```
+
+```{r b7, fig.cap = "\\label{fig:stl_b7} Dekompozycja STL dla s.window - periodic, t.window=7"}
+
+dekomp.stl.4 <- stl(bezrobocie, s.window="periodic", t.window=7) 
+autoplot(dekomp.stl.4) + ggtitle('Parametry: s.window - periodic, t.window=7')
+
+```
+
+Dzięki wykresom \ref{fig:stl_137}, \ref{fig:stl_77}, \ref{fig:stl_b7} możemy dostrzc, że parametr `t.window` skutecznie wpływa na zmniejszenie reszt. Nieważne jak ustawiliśmy `s.window`, dla `t.window = 7` reszty były najmniejsze, czyli zarówno trend jak i sezonowość zostały najlepiej dopasowane. Możemy z tego wywnioskować, że dla dobrego dopasowania STL najważniejsze było odpowiednie dopasowanie do szybko zmieniającego się trendu. Natomiast sezonowość jest stabilna i łatwa do oddzielenia w przypadku tych danych, więc `s.window` nie wpływa znacznie na oddzielenie reszt.
+
+
+
+## Czy zastosowanie transformacji Boxa-Coxa prowadzi do poprawy jakości dopasowania modeli dekompozycji?
+
+Do porównania "przed i po" transformacji Boxa-Coxa wybieramy `decompose` w wersji addytywnej, bo to on ma większy sens dla tych danych. Z modeli regresji wybieramy wariant `liniowy + sezonowość`, ponieważ jest prosty i przynajmniej dobrze wskazuje trend. Natomiast spośród STL będziemy porównywać jeden z lepiej dopasowanych wariantów o parametrach `s.window = 13`, `t.window = 7` .
+
+Najpierw wyznaczymy optymalną wartość parametru $\lambda$ metodą guerrero, która stosuje podział szeregu na podokresy i szuka $\lambda$ minimalizującego współczynnik zmienności w podokresach.
+
+```{r dane}
+y <- bezrobocie
+```
+
+```{r lambda, echo=TRUE}
+
+#  wybór lambdy
+lambda_hat <- BoxCox.lambda(y, method="guerrero")  
+#  transformacja
+y_bc <- BoxCox(y, lambda_hat) 
+```  
+
+```{r boxcox}
+dekomp.add.bc <- decompose(y_bc, type="additive")
+  
+tslm.1.bc <- tslm(y_bc ~ trend + season)
+  
+dekomp.stl.4.bc <- stl(y_bc, s.window=13, t.window=7) 
+
+```
+
+
+Aby móc właściwie porównać dane odwracamy transformację Boxa–Coxa i przywracamy dane do oryginalnej skali.
+
+
+```{r boxcoxinv, echo=TRUE}
+# 1. decompose
+fit.dekomp.add <- dekomp.add$trend + dekomp.add$seasonal
+fit.dekomp.add.bc <- InvBoxCox(dekomp.add.bc$trend + dekomp.add.bc$seasonal, lambda_hat)
+
+# 2. TSLM
+fit.tslm.1 <- fitted(tslm.1)
+fit.tslm.1.bc <- InvBoxCox(fitted(tslm.1.bc), lambda_hat)
+
+# 3. STL
+fit.stl.4 <- trendcycle(dekomp.stl.4) + seasonal(dekomp.stl.4)
+fit.stl.4.bc <- InvBoxCox(trendcycle(dekomp.stl.4.bc) + seasonal(dekomp.stl.4.bc), lambda_hat)
+```
+
+Aby sprawdzić dopasowanie obliczamy pierwastek z średniego błędu kwadratowego. Pokaże nam to jak średnio duże są błędy dopasowania modelu do danych.
+
+$$
+\text{RMSE} = \sqrt{\frac{1}{n} \sum_{t=1}^{n} \left( y_t - (\hat{\text{trend}}_t + \hat{\text{sezonowość}}_t) \right)^2 }
+$$
+
+gdzie:  
+- $y_t$ – obserwowana wartość szeregu w czasie $t$  
+- $\hat{\text{trend}}_t$ – wartość trendu w czasie $t$ wyznaczona przez model  
+- $\hat{\text{sezonowość}}_t$ – wartość składowej sezonowej w czasie $t$ wyznaczona przez model  
+- $n$ – liczba obserwacji
+
+
+```{r rmse, echo=TRUE}
+
+rmse <- function(actual, fitted){
+  sqrt(mean((actual - fitted)^2, na.rm = TRUE))
+}
+```
+
+
+```{r tabela_rmse}
+
+# Obliczenie RMSE dla każdej metody
+rmse_table <- data.frame(
+  Metoda = c("Decompose", "TSLM", "STL"),
+  RMSE_oryginal = c(rmse(y, fit.dekomp.add),
+                     rmse(y, fit.tslm.1),
+                     rmse(y, fit.stl.4)),
+  RMSE_BoxCox = c(rmse(y, fit.dekomp.add.bc),
+                  rmse(y, fit.tslm.1.bc),
+                  rmse(y, fit.stl.4.bc))
+)
+
+kable(rmse_table, caption = "Porównanie RMSE dla różnych metod dekompozycji przed i po Box-Cox")
+
+```
+
+
+Addytywny wariant decompose nie poprawił swojego dopasowania po transformacji Boxa-Coxa, jest lepszy niż `tslm`, ale gorszy niż `stl`. Brak zmian mamy również w przypadku `tslm` liniowego, z tą różnicą, że dopasowanie było bardzo złe i pozostało bardzo złe. Natomiast w przypadku `stl` udało się poprawić wynik.
+
+
+## Eliminacja trendu poprzez różnicowanie danych
+
+W tym podpunkcie przyjrzymy się szeregom reszt otrzymanym po eliminacji trendu i sezonowości. Porównamy działanie metod `decompose` `tslm` i `stl` do różnicowania.
+
+```{r przygotowanie_danych}
+
+dekomp.add <- decompose(bezrobocie, type = "additive")
+tslm.1 <- tslm(bezrobocie ~ trend + season)
+dekomp.stl.4 <- stl(bezrobocie, s.window = 13, t.window = 7)
+
+res.add <- dekomp.add$random
+
+res.tslm <- resid(tslm.1)
+
+res.stl <- dekomp.stl.4$time.series[, "remainder"]
+
+S <- frequency(bezrobocie) # wyznaczanie rzędu sezonowości
+
+res.diff <- diff(bezrobocie, lag = S) # usunięcie sezonowości
+res.diff2 <- diff(res.diff)  # usuniecie trendu
+
+```
+
+### Szereg różnic po użyciu decompose
+
+```{r res_d, fig.cap = "\\label{fig:res_d} Szereg reszt dla metody decompose"}
+plot(res.add, main = "Reszty: decompose() additive")
+```
+
+Po zastosowaniu decompose, szereg reszt \ref{fig:res_d} nie zdradza trendu ani wzorców sezonowych. Wygląda jak losowy szum, z dużą, lecz stabilną amplitudą na całym przedziale, oprócz jednego miejsca między rokiem 2000 i 2005. 
+
+
+```{r acf_d, fig.cap = "\\label{fig:acf_d} ACF dla metody decompose"}
+acf(na.omit(res.add), main = "ACF – decompose()")
+```
+Na \ref{fig:acf_d} widzimy, że dopiero od czwartego opóźnienia ACF schodzi poniżej poziomu istotności, a na stałe utrzymuje się poniżej dopiero od ósmego opóźnienia. Oznacza to, że trend i sezonowość mogły nie zostać do końca usunięte.
+
+### Szereg różnic po użyciu tslm
+
+```{r res_t, fig.cap = "\\label{fig:res_t} Szereg reszt dla metody tslm"}
+plot(res.tslm, main = "Reszty: tslm(trend + season)")
+```
+
+Na wykresie \ref{fig:res_t} widzimy wyraźny trend i sezonowość, tak jak zauważyliśmy wcześniej, dekompozycja oparta na podstawie modelu regresji nie nadaje się do wykorzystania z tymi danymi.
+
+```{r acf_t}
+acf(na.omit(res.tslm), main = "ACF – tslm()")
+```
+
+Wszystkie opóźnienia znajdują się powyżej poziomu istotności.
+
+### Szereg różnic po użyciu stl
+
+```{r rest_s, fig.cap = "\\label{fig:res_s} Szereg reszt dla metody stl"}
+plot(res.stl, main = "Reszty: STL")
+```
+
+Jak możemy zauważyć na \ref{fig:res_s} poza jednym skokiem wariancja jest stała i bardzo mała, wygląda jak szum wokół zera. Nie widać trendu ani sezonowości.
+
+```{r acf_s}
+acf(na.omit(res.stl), main = "ACF – STL")
+```
+
+ACF bardzo szybko maleje, już od czwartego opóźnienia spada poniżej poziomu istotności. Jest to bardzo dobry znak jeśli chodzi o stacjonarność. Spośród metod dekompozycji metoda `stl` dała najlepszy wynik.
+
+### Szereg róźnic otrzymany po różnicowaniu
+
+```{r rest_diff, fig.cap = "\\label{fig:res_diff} Szereg reszt po różnicowaniu"}
+plot(res.diff2, main = "Reszty: różnicowanie")
+```
+
+Wykres reszt \ref{fig:res_diff} prezentuje się dość obiecująco, ale pojawiają się dwa skoki w okolicach roku 2004 i co gorsza fragment między 2008 i 2010 nie wygląda jak szum losowy tylko jak trend rosnący, a następnie malejący.
+
+```{r acf_diff}
+acf(na.omit(res.diff2), main = "ACF – różnicowanie")
+```
+
+ACF bardzo szybko maleje, ale do 7 opóźnienia, większość opóźnień jest powyżej poziomu istotności co nie jest dobrym znakiem.
+
+
+## Podsumowanie i wnioski końcowe
+
+Przeprowadzona analiza szeregu czasowego pozwoliła na porównanie skuteczności różnych metod dekompozycji oraz ocenę stacjonarności uzyskanych reszt. Główne wnioski przedstawiają się następująco:
+
+1. **Efektywność modeli dekompozycji:**
+   * Najwyższą jakość dopasowania uzyskała **metoda STL** ($RMSE = 0.0913$). Dobór parametrów `s.window` oraz `t.window = 7` pozwolił na precyzyjne oddzielenie nieliniowego trendu od składowej sezonowej.
+   * **Klasyczna dekompozycja addytywna** wykazuje poprawne, choć mniej precyzyjne dopasowanie ($RMSE = 0.1969$).
+   * **Model regresyjny (TSLM)** okazał się całkowicie nieadekwatny ($RMSE = 2.4478$), co potwierdza, że sztywna struktura liniowa nie jest w stanie opisać dynamiki analizowanego zjawiska.
+
+2. **Wpływ transformacji Boxa-Coxa:**
+   * Zastosowanie transformacji z parametrem $\lambda$ wyznaczonym metodą Guerrero przyniosło istotną poprawę jedynie w przypadku **metody STL** (spadek RMSE do poziomu **0.0873**). W pozostałych metodach wpływ transformacji na błędy dopasowania był marginalny.
+
+3. **Ocena stacjonarności reszt:**
+   * Za szereg zbliżony do **stacjonarnego (szum biały)** można uznać jedynie reszty otrzymane metodą **STL**. Potwierdza to wykres ACF, który najszybciej wygasa, schodząc poniżej poziomu istotności już przy 4. opóźnieniu.
+   * Reszty po **różnicowaniu** oraz z metody **decompose** wykazują niestabilność wariancji oraz powracające autokorelacje, co sugeruje, że część struktury trendu lub sezonowości nie została w pełni wyeliminowana.
+   * Reszty z modelu **TSLM** jednoznacznie nie są stacjonarne – wykazują silny trend resztowy.
+
+**Wniosek końcowy:** Metoda **STL z transformacją Boxa-Coxa** jest optymalnym podejściem dla badanego szeregu, zapewniając najlepszą separację sygnału od szumu oraz generując składnik losowy o pożądanych właściwościach statystycznych.
+
