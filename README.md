@@ -1,5 +1,5 @@
 # Time-Series-Analysis
-Statystyczna analiza i prognozowanie szeregów czasowych w R przygotowane w parze.
+Statystyczna analiza i prognozowanie szeregów czasowych przygotowane w parze.
 
 ## Projekt 1: Dekompozycja i Analiza Stacjonarności
 
