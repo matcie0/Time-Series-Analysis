@@ -1,0 +1,1276 @@
+---
+title: "Sprawozdanie 2"
+author: "Mateusz Cieślak, Michał Merta"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    toc: true        
+    toc_depth: 3     
+    number_sections: true 
+toc: true
+lof: true
+lot: true
+
+header-includes:
+- \usepackage[hypcap=true]{caption}
+- \usepackage{booktabs}
+- \usepackage{longtable}
+- \usepackage{array}
+- \usepackage{float}
+- \usepackage{graphicx}
+- \usepackage[OT4]{polski}
+- \usepackage[utf8]{inputenc}
+- \usepackage{amsmath}
+- \renewcommand{\contentsname}{Spis treści}
+- \renewcommand{\listfigurename}{Spis wykresów}
+- \renewcommand{\listtablename}{Spis tabel}
+- \renewcommand{\figurename}{Wykres}
+- \renewcommand{\tablename}{Tabela}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  dev = "quartz_pdf",
+  fig.width = 6,
+  fig.height = 3,
+  out.extra='',
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE)
+knitr::opts_chunk$set(fig.pos = "H", out.extra = "", fig.align = "center", set.seed(123))
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE)
+
+```
+
+Wykorzystane biblioteki:
+
+
+```{r biblioteki, echo=TRUE}
+library(ggplot2)
+library(forecast)
+library(knitr)
+library(dplyr)
+library(fpp2)
+library(kableExtra)
+library(astsa)
+library(stats)
+library(tseries)    
+library(lmtest) 
+library(patchwork)
+library(xtable)
+```
+
+
+\newpage
+
+# Zadanie 3 - Dopasowanie modeli autoregresji
+
+## Krótki opis zagadnienia
+W niniejszym zadaniu analizie poddajemy szereg czasowy `gtemp_both`, przedstawiający odchylenia średniej rocznej temperatury globalnej (lądy i oceany) w latach 1850-2023. Celem badania jest przeprowadzenie kompletnej ścieżki modelowania z wykorzystaniem procesów autoregresyjnych AR(p).
+
+Analiza obejmuje weryfikację stacjonarności, zastosowanie odpowiednich transformacji (różnicowanie vs eliminacja trendu wielomianowego), identyfikację rzędu modelu, estymację parametrów oraz diagnostykę reszt i prognozowanie.
+
+## a) Sprawdzenie stacjonarności i transformacje danych
+
+W pierwszej kolejności dokonujemy wizualizacji danych źródłowych w celu wstępnej oceny charakteru szeregu.
+
+```{r wstepna_analiza, echo=FALSE, fig.cap="\\label{fig:gtemp_raw}Wykres szeregu czasowego gtemp\\_both"}
+data_ts <- gtemp_both
+df_temp <- data.frame(
+  Year = time(data_ts),
+  Temp = as.numeric(data_ts)
+)
+
+ggplot(df_temp, aes(x = Year, y = Temp)) +
+  geom_line(color = "steelblue") +
+  geom_smooth(method = "loess", color = "red", linetype = "dashed", se = FALSE, size=0.5) +
+  labs(title = "Globalne odchylenia temperatury (1850-2023)",
+       subtitle = "Z nałożonym trendem lokalnym (Loess)",
+       x = "Rok", y = "Odchylenie [°C]") +
+  theme_minimal()
+```
+
+Na Wykresie \ref{fig:gtemp_raw} obserwujemy wyraźny, nieliniowy trend wzrostowy, sugerujący niestacjonarność średniej. Aby zweryfikować tę hipotezę formalnie, przeprowadzamy formalne testy stacjonarności: **Augmented Dickey-Fuller (ADF)** oraz **KPSS**.
+
+```{r testy_stacjonarnosci_raw, echo=FALSE, results='asis'}
+adf_raw <- adf.test(data_ts)
+kpss_raw <- kpss.test(data_ts, null="Trend") 
+
+results_raw <- data.frame(
+  Test = c("ADF", "KPSS"),
+  Statystyka = c(adf_raw$statistic, kpss_raw$statistic),
+  `p-value` = c(adf_raw$p.value, kpss_raw$p.value),
+  Wniosek = c("Nie odrzucamy H0 (Niestacjonarny)", "Odrzucamy H0 (Niestacjonarny)")
+)
+
+caption_text_raw <- "Wyniki testów stacjonarności dla surowego szeregu gtemp\\_both."
+tab_raw <- xtable(results_raw, caption = caption_text_raw, label = "tab:testy_raw")
+print(tab_raw, include.rownames=FALSE, table.placement="H", comment=FALSE)
+```
+
+Wyniki w Tabeli \ref{tab:testy_raw} jednoznacznie wskazują na niestacjonarność badanego procesu (p-value > 0.05 dla ADF oraz p-value < 0.05 dla KPSS). Konieczne jest zatem zastosowanie transformacji.
+
+### Odpowiedni wariant różnicowania
+
+Pierwszym podejściem jest zastosowanie różnicowania rzędu pierwszego ($d=1$), co odpowiada eliminacji trendu stochastycznego.
+$$Y_t = \nabla X_t = X_t - X_{t-1}$$
+
+```{r roznicowanie33, echo=FALSE, fig.cap="\\label{fig:diff_plot}Szereg gtemp\\_both po jednokrotnym zróżnicowaniu z zaznaczonym dryfem (średnią)."}
+diff_data <- diff(gtemp_both)
+drift_value <- mean(diff_data)
+
+autoplot(diff_data) +
+  geom_line(color = "darkgreen") +
+  geom_hline(yintercept = 0, linetype="dotted", color="gray50") + 
+  geom_hline(yintercept = drift_value, linetype="dashed", color="red", size=0.8) +
+  labs(title = "Przyrosty roczne temperatury (Zróżnicowany szereg)",
+       subtitle = paste("Czerwona linia oznacza średni dryf =", round(drift_value, 4)),
+       x = "Rok", y = "Zmiana [°C]") +
+  theme_minimal()
+```
+
+Wizualnie szereg przedstawiony na Rysunku \ref{fig:diff_plot} wykazuje cechy stacjonarności (oscylacje wokół stałego poziomu). Potwierdzamy to testami statystycznymi.
+
+```{r testy_diff, echo=FALSE, results='asis'}
+adf_diff <- adf.test(diff_data)
+kpss_diff <- kpss.test(diff_data)
+
+results_diff <- data.frame(
+  Test = c("ADF", "KPSS"),
+  Statystyka = c(adf_diff$statistic, kpss_diff$statistic),
+  `p-value` = c(adf_diff$p.value, kpss_diff$p.value),
+  Wniosek = c("Odrzucamy H0 (Stacjonarny)", "Nie odrzucamy H0 (Stacjonarny)")
+)
+
+caption_text_diff <- "Wyniki testów stacjonarności dla szeregu zróżnicowanego."
+tab_diff <- xtable(results_diff, caption = caption_text_diff, label = "tab:testy_diff")
+print(tab_diff, include.rownames=FALSE, table.placement="H", comment=FALSE)
+```
+
+Zgodnie z Tabelą \ref{tab:testy_diff}, jednokrotne różnicowanie skutecznie sprowadziło szereg do stacjonarności.
+
+### Dodatkowa weryfikacja: Próba dwukrotnego różnicowania (d=2)
+
+Aby upewnić się, że rząd różnicowania $d=1$ jest optymalny, przeprowadzamy eksperymentalnie drugie różnicowanie ($\nabla^2 X_t$). Zgodnie z teorią, jeśli szereg został "przeróżnicowany", powinniśmy zaobserwować wzrost odchylenia standardowego oraz silną, ujemną autokorelację w pierwszym opóźnieniu (ACF).
+
+```{r over_differencing, echo=FALSE, fig.cap="\\label{fig:diff2_check}Porównanie ACF dla d=1 (lewo) i d=2 (prawo)."}
+diff2_data <- diff(gtemp_both, differences = 2)
+
+sd_d1 <- sd(diff_data, na.rm=TRUE)
+sd_d2 <- sd(diff2_data, na.rm=TRUE)
+
+title_d1 <- paste0("ACF dla d=1\n(SD = ", round(sd_d1, 4), ")")
+title_d2 <- paste0("ACF dla d=2 (Przeróżnicowanie)\n(SD = ", round(sd_d2, 4), ")")
+
+p_acf1 <- ggAcf(diff_data) + 
+  labs(title = title_d1) +
+  theme(plot.title = element_text(size=10))
+
+p_acf2 <- ggAcf(diff2_data) + 
+  labs(title = title_d2) +
+  theme(plot.title = element_text(size=10))
+
+p_acf1 + p_acf2
+```
+
+**Wnioski z analizy d=2:**
+
+1.  **Wzrost zmienności:** Odchylenie standardowe dla $d=2$ jest wyższe niż dla $d=1$ (wzrost z ok. `r round(sd_d1, 3)` do `r round(sd_d2, 3)`). Oznacza to, że drugie różnicowanie wprowadziło dodatkowy szum zamiast uprościć strukturę danych.
+2.  **Sztuczna autokorelacja:** Na prawym wykresie (dla $d=2$) widoczna jest silniejsza ujemna korelacja dla opóźnienia 1 ($\rho(1) \approx -0.5$). Jest to klasyczny objaw przeróżnicowania, wynikający z wprowadzania sztucznej zależności między kolejnymi błędami.
+
+Powyższe obserwacje ostatecznie potwierdzają, że optymalnym rzędem różnicowania jest **$d=1$**.
+
+**Weryfikacja stacjonarności po dwukrotnym różnicowaniu**
+
+Dla pełnego obrazu przeprowadzono również testy stacjonarności dla szeregu podwójnie zróżnicowanego ($d=2$).
+
+```{r testy_diff2, echo=FALSE, results='asis'}
+diff2_data <- diff(gtemp_both, differences = 2)
+
+adf_d2 <- adf.test(diff2_data)
+kpss_d2 <- kpss.test(diff2_data)
+
+results_d2 <- data.frame(
+  Test = c("ADF", "KPSS"),
+  Statystyka = c(adf_d2$statistic, kpss_d2$statistic),
+  `p-value` = c(adf_d2$p.value, kpss_d2$p.value),
+  Wniosek = c("Odrzucamy H0 (Stacjonarny)", "Nie odrzucamy H0 (Stacjonarny)")
+)
+
+xtab_d2 <- xtable(results_d2, caption = "Wyniki testów stacjonarności dla d=2.", label = "tab:testy_d2")
+print(xtab_d2, include.rownames=FALSE, table.placement="H", comment=FALSE)
+```
+
+**Komentarz do wyników:**
+Jak widać w Tabeli \ref{tab:testy_d2}, testy potwierdzają stacjonarność również dla $d=2$. Jest to wynik oczekiwany (różnicowanie procesu słabo stacjonarnego zachowuje słabą stacjonarność). Jednakże, sam fakt bycia stacjonarnym nie oznacza, że transformacja jest optymalna. Decydującym kryterium odrzucenia $d=2$ na rzecz $d=1$ jest wspomniany wcześniej wzrost wariancji oraz zwiększona ujemna autokorelacja (widoczna na wykresach ACF), świadczące o przeróżnicowaniu.
+
+Jako ostateczne potwierdzenie wyboru rzędu różnicowania $d$, wykorzystamy funkcję `ndiffs()` z pakietu `forecast`. Funkcja ta algorytmicznie dobiera minimalną liczbę różnicowań wymaganą do osiągnięcia stacjonarności, opierając się na wynikach testów statystycznych (KPSS oraz ADF).
+
+```{r ndiffs_check, echo=FALSE}
+n_diff_kpss <- ndiffs(gtemp_both, test = "kpss")
+n_diff_adf <- ndiffs(gtemp_both, test = "adf")
+```
+
+\newpage
+
+**Wniosek i wyniki testów:**
+
+Algorytmiczna weryfikacja potwierdza nasze wcześniejsze ustalenia. Test KPSS wskazał jako optymalny rząd różnicowania **$d=`r n_diff_kpss`$**, natomiast test ADF również zasugerował **$d=`r n_diff_adf`$**.
+
+Jest to obiektywne potwierdzenie, że jednokrotne różnicowanie jest optymalne dla analizowanego szeregu. Skuteczność jednokrotnego różnicowania ($d=1$) można uzasadnić, przyjmując model Błądzenia Losowego z Dryfem jako proces generujący dane. Równanie takiego procesu ma postać:
+$$X_t = c + X_{t-1} + Z_t$$
+gdzie $c$ jest stałą (dryfem), a $Z_t$ białym szumem.
+
+Po zastosowaniu operatora różnicowania $\nabla X_t = X_t - X_{t-1}$, równanie sprowadza się do postaci:
+$$\nabla X_t = c + Z_t$$
+
+Otrzymany proces posiada stałą wartość oczekiwaną $E[\nabla X_t] = c$ oraz stałą wariancję $Var(\nabla X_t) = \sigma^2_Z$, co spełnia warunki stacjonarności. Wynik ten sugeruje, że obserwowana nieliniowość ("przyspieszenie") wzrostu temperatury na wykresie pierwotnym może być interpretowana jako efekt kumulacji stochastycznych wstrząsów w procesie z dodatnim dryfem, a niekoniecznie jako deterministyczny trend wielomianowy wyższego rzędu.
+
+### Estymacja i eliminacja trendu wielomianowego
+
+Drugim podejściem jest założenie trendu deterministycznego. Ze względu na widoczne przyspieszenie wzrostu temperatury, dopasowano model trendu wielomianowego drugiego stopnia (kwadratowy):
+$$X_t = \beta_0 + \beta_1 t + \beta_2 t^2 + Z_t$$
+
+```{r trend_wielomianowy, echo=FALSE}
+t <- time(gtemp_both)
+model_trend <- lm(gtemp_both ~ t + I(t^2))
+detrended_data <- ts(resid(model_trend), start = start(gtemp_both), frequency = frequency(gtemp_both))
+```
+
+```{r plot_detrend, echo=FALSE, fig.cap="\\label{fig:trend_resid}Dopasowanie trendu kwadratowego (góra) i reszty z modelu regresji (dół)."}
+df_temp <- data.frame(
+  Rok = as.numeric(time(gtemp_both)),
+  Temp = as.numeric(gtemp_both)
+)
+
+# Dodanie dopasowania (Fitted) ORAZ reszt (Reszty) do ramki danych
+df_temp$Fitted <- fitted(model_trend)
+df_temp$Reszty <- as.numeric(resid(model_trend)) # <--- TEJ LINI BRAKOWAŁO
+
+# Wykres 1: Trend
+p1 <- ggplot(df_temp, aes(x = Rok)) +
+  geom_line(aes(y = Temp), color = "gray50") +
+  geom_line(aes(y = Fitted), color = "red", size = 1) +
+  labs(title = "Dopasowanie trendu kwadratowego", y = "Temp") +
+  theme_minimal()
+
+# Wykres 2: Reszty
+p2 <- ggplot(df_temp, aes(x = Rok, y = Reszty)) +
+  geom_line(color = "purple") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Szereg po usunięciu trendu (Reszty)", y = "Reszty") +
+  theme_minimal()
+
+# Złożenie wykresów
+p1 / p2
+```
+
+\newpage
+
+Reszty modelu (Rysunek \ref{fig:trend_resid}, panel dolny) wydają się spełniać założenia stacjonarności. Sprawdzimy to formalnymi testami.
+
+```{r testy_trend, echo=FALSE, results='asis'}
+adf_det <- adf.test(detrended_data)
+kpss_det <- kpss.test(detrended_data)
+
+results_det <- data.frame(
+  Test = c("ADF", "KPSS"),
+  Statystyka = c(adf_det$statistic, kpss_det$statistic),
+  `p-value` = c(adf_det$p.value, kpss_det$p.value),
+  Wniosek = c("Odrzucamy H0 (Stacjonarny)", "Nie odrzucamy H0 (Stacjonarny)")
+)
+
+caption_text_det <- "Wyniki testów stacjonarności dla szeregu po eliminacji trendu wielomianowego."
+tab_det <- xtable(results_det, caption = caption_text_det, label = "tab:testy_det")
+print(tab_det, include.rownames=FALSE, table.placement="H", comment=FALSE)
+```
+
+Zgodnie z Tabelą \ref{tab:testy_det}, dopasowanie wielomianu kwadratowego skutecznie usunęło trend i doprowadziło szereg do postaci stacjonarnej.
+
+### Sprawdzenie trendu liniowego (Weryfikacja)
+
+Dla porównania i weryfikacji charakteru trendu sprawdzimy jeszcze prostszy model, zakładający liniowy wzrost temperatury: $X_t = \beta_0 + \beta_1 t + Z_t$.
+
+```{r trend_liniowy, echo=FALSE}
+model_lin <- lm(gtemp_both ~ t)
+lin_resid <- ts(resid(model_lin), start = start(gtemp_both), frequency = frequency(gtemp_both))
+```
+
+```{r plot_lin_resid, echo=FALSE, fig.cap="\\label{fig:lin_fittrend_resid}Dopasowanie trendu kwadratowego (góra) i reszty z modelu regresji (dół)."}
+
+df_temp <- data.frame(
+  Rok = as.numeric(time(gtemp_both)),
+  Temp = as.numeric(gtemp_both)
+)
+
+df_temp$Fitted <- fitted(model_lin)
+df_temp$Reszty <- as.numeric(resid(model_lin))
+
+p1 <- ggplot(df_temp, aes(x = Rok)) +
+  geom_line(aes(y = Temp), color = "gray50") +
+  geom_line(aes(y = Fitted), color = "red", size = 1) +
+  labs(title = "Dopasowanie trendu kwadratowego", y = "Temp") +
+  theme_minimal()
+
+p2 <- ggplot(df_temp, aes(x = Rok, y = Reszty)) +
+  geom_line(color = "purple") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Szereg po usunięciu trendu (Reszty)", y = "Reszty") +
+  theme_minimal()
+
+p1 / p2
+```
+
+Na Rysunku \ref{fig:lin_fittrend_resid} (panel dolny) widać wyraźnie, że reszty nie oscylują losowo wokół zera, lecz tworzą charakterystyczny kształt litery "U" (są dodatnie na krańcach i ujemne w środku przedziału). Oznacza to, że model liniowy nie wychwytuje przyspieszenia wzrostu temperatury. Potwierdzają to testy stacjonarności reszt w Tabeli \ref{tab:test_lin}. Optymalnym modelem będzie zatem uznanie trendu kwadratowego.
+
+```{r testy_lin, echo=FALSE, results='asis'}
+adf_lin <- adf.test(lin_resid)
+kpss_lin <- kpss.test(lin_resid)
+
+results_lin <- data.frame(
+  Test = c("ADF", "KPSS"),
+  Statystyka = c(adf_lin$statistic, kpss_lin$statistic),
+  `p-value` = c(adf_lin$p.value, kpss_lin$p.value),
+  Wniosek = c("?", "?")
+)
+results_lin$Wniosek <- ifelse(results_lin$p.value < 0.05, 
+                              "Odrzucamy H0 (niestacjonarny)", 
+                              "Nie odrzucamy H0 (niestacjonarny)")
+
+tab_lin <- xtable(results_lin, caption = "Testy stacjonarności dla reszt z trendu liniowego.", label = "tab:test_lin")
+print(tab_lin, include.rownames=FALSE, table.placement="H", comment=FALSE)
+```
+
+## b) Wybór optymalnych rzędów modeli autoregresji
+
+Kolejnym etapem jest identyfikacja rzędu $p$ modelu autoregresyjnego AR(p). W tym celu wykorzystano dwie uzupełniające się metody:
+
+1.  **Analiza funkcji cząstkowej autokorelacji (PACF):** Dla procesu AR(p) teoretyczna funkcja PACF powinna "ucinać się" po opóźnieniu $p$.
+2.  **Kryteria informacyjne (AIC, FPE):** Szukamy rzędu $p$, dla którego wartości kryteriów są minimalne.
+
+### Analiza funkcji PACF
+
+Poniżej przedstawiono wykresy PACF dla obu badanych szeregów stacjonarnych.
+
+```{r pacf_analysis, echo=FALSE, fig.cap="\\label{fig:pacf_comparison}Funkcja PACF dla danych zróżnicowanych (lewa) i po usunięciu trendu wielomianowgo (prawa)."}
+par(mfrow=c(1,2))
+
+pacf(diff_data, lag.max = 20, 
+     main = "PACF: Szereg zróżnicowany", 
+     ylab = "PACF", ylim = c(-0.5, 0.5))
+
+pacf(detrended_data, lag.max = 20, 
+     main = "PACF: Szereg z usuniętym trendem wielomianowym", 
+     ylab = "PACF", ylim = c(-0.5, 0.5))
+
+par(mfrow=c(1,1))
+```
+
+**Wnioski z analizy PACF (Rysunek \ref{fig:pacf_comparison}):**
+
+* **Szereg zróżnicowany (lewy):** Obserwujemy istotne statystycznie, ujemne wartości PACF dla opóźnień od 1 do 3, a słupki przy opóźnieniach 4 i 5 znajdują się na granicy istotności. Sugeruje to konieczność zastosowania modelu wyższego rzędu, np. **AR(5)**, **AR(4)** lub **AR(3)**.
+* **Szereg z usuniętym trendem wielomianowym (prawy):** Wykres jest bardzo czytelny – występuje jeden wyraźny, dodatni słupek dla opóźnienia **p=1**, po czym funkcja gwałtownie zanika (pozostałe opóźnienia mieszczą się w przedziałach ufności lub wychodzą bardzo nieznacznie). Jest to charakterystyczny obraz dla procesu **AR(1)**.
+
+\newpage
+
+### Analiza kryteriów AIC i FPE
+
+W celu precyzyjnego dobrania rzędu, obliczono wartości kryteriów AIC oraz FPE dla modeli AR rzędu $p=0, \dots, 15$.
+
+```{r criteria_calc, echo=TRUE}
+calc_criteria <- function(data, p_max=15) {
+  aic_vals <- numeric(p_max+1)
+  fpe_vals <- numeric(p_max+1)
+  p_vec <- 0:p_max
+  n <- length(data)
+  
+  for(i in 1:length(p_vec)) {
+    p <- p_vec[i]
+    fit <- tryCatch(arima(data, order=c(p,0,0), method="ML"), error=function(e) NULL)
+    
+    if(!is.null(fit)) {
+      aic_vals[i] <- fit$aic
+      sigma2 <- fit$sigma2
+      fpe_vals[i] <- sigma2 * (n + p) / (n - p)
+    } else {
+      aic_vals[i] <- NA; fpe_vals[i] <- NA
+    }
+  }
+  return(data.frame(p = p_vec, AIC = aic_vals, FPE = fpe_vals))
+}
+
+results_diff <- calc_criteria(diff_data)
+results_det <- calc_criteria(detrended_data)
+```
+
+```{r criteria_plot, echo=FALSE, fig.cap="\\label{fig:criteria_plot}Przebieg kryteriów AIC i FPE."}
+library(tidyr)
+df_plot_diff <- results_diff %>%
+  pivot_longer(cols = c("AIC", "FPE"), names_to = "Metric", values_to = "Value") %>%
+  mutate(Type = "Zróżnicowane")
+
+df_plot_det <- results_det %>%
+  pivot_longer(cols = c("AIC", "FPE"), names_to = "Metric", values_to = "Value") %>%
+  mutate(Type = "Z usuniętym trendem wielomianowym")
+
+df_all <- rbind(df_plot_diff, df_plot_det)
+
+ggplot(df_all, aes(x = p, y = Value, color = Type)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~Metric, scales = "free_y", ncol = 1) +
+  scale_x_continuous(breaks = 0:15) +
+  labs(title = "Kryteria AIC i FPE dla rzędów p od 0 do 15",
+       y = "Wartość kryterium", x = "Rząd modelu p") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+\newpage
+
+**Analiza wykresów kryteriów (Rysunek \ref{fig:criteria_plot}):**
+
+1.  **Dla danych z usuniętym trendem wielomianowym (linia czerwona):** Minimum obu kryteriów jest osiągane bardzo szybko, już dla **p=1**. Dalsze zwiększanie rzędu powoduje wzrost wartości kryterium. Jest to zgodne z obserwacją z wykresu PACF.
+2.  **Dla danych zróżnicowanych (linia niebieska):** Wartość kryterium spada wyraźnie aż do rzędu **p=5**, gdzie osiąga lokalne minimum. Wskazuje to, że struktura autokorelacji w przyrostach temperatury jest bardziej złożona i wymaga dłuższego "pamiętania" historii.
+
+**Decyzja o wyborze modeli:**
+Biorąc pod uwagę zasadę oszczędności oraz zgodność obu metod identyfikacji (PACF i AIC), do dalszej analizy przyjęto:
+
+* Model **AR(5)** dla podejścia zróżnicowanego (ze względu na minimum AIC przy p=5 i istotne PACF do lag 5).
+* Model **AR(1)** dla podejścia z trendem wielomianowym (ze względu na wyraźne odcięcie PACF i minimum AIC przy p=1).
+
+### Automatyczna weryfikacja rzędu p (funkcja ar)
+
+Aby potwierdzić wnioski wyciągnięte z analizy wykresów PACF oraz przebiegu kryteriów informacyjnych, wykorzystano wbudowaną funkcję `ar()`. Funkcja ta automatycznie dobiera optymalny rząd modelu autoregresyjnego, minimalizując kryterium AIC.
+
+```{r auto_selection, echo=TRUE}
+auto_diff <- ar(diff_data, order.max=15, method="mle")
+auto_det <- ar(detrended_data, order.max=15, method="mle")
+```
+
+**Komentarz do wyników automatycznych:**
+
+Wyniki uzyskane algorytmicznie funkcją `ar()` potwierdzają wcześniejszą analizę wizualną:
+
+1.  Dla **szeregu zróżnicowanego** automat wskazał **$p=`r auto_diff$order`$** (co pokrywa się z lokalnym minimum AIC na wykresie).
+2.  Dla **szeregu z usuniętym trendem wielomianowym** automat wskazał **$p=`r auto_det$order`$** (co idealnie potwierdza obserwację jednego silnego słupka na wykresie PACF).
+
+Ostatecznie utwierdza to nas w wyborze modeli **AR(`r auto_diff$order`)** (dla podejścia różnicowego) oraz **AR(`r auto_det$order`)** (dla podejścia z trendem).
+
+## c) Wyznaczenie estymatorów parametrów
+
+Dla zidentyfikowanych w poprzednim punkcie rzędów modeli (**AR(5)** dla szeregu zróżnicowanego oraz **AR(1)** dla szeregu po usunięciu trendu wielomianowego) przeprowadzono estymację parametrów strukturalnych $\phi_i$ oraz wariancji szumu $\sigma^2$.
+
+Porównano wyniki uzyskane dwiema metodami:
+
+1.  **Metoda Yule’a-Walkera (YW):** Metoda momentów, polegająca na rozwiązaniu liniowego układu równań wiążących teoretyczną autokorelację z parametrami modelu. Jest efektywna obliczeniowo, ale traktowana jako estymacja wstępna.
+2.  **Metoda Największej Wiarygodności (MLE):** Metoda optymalizacyjna, szukająca takich wartości parametrów, które maksymalizują funkcję wiarogodności danych. Jest to estymator asymptotycznie efektywny, preferowany w końcowym modelowaniu.
+
+```{r estymacja_param, echo=TRUE}
+p_diff <- 5
+fit_diff_yw <- ar(diff_data, order.max=p_diff, aic=FALSE, method="yw")
+fit_diff_mle <- ar(diff_data, order.max=p_diff, aic=FALSE, method="mle")
+
+p_det <- 1
+fit_det_yw <- ar(detrended_data, order.max=p_det, aic=FALSE, method="yw")
+fit_det_mle <- ar(detrended_data, order.max=p_det, aic=FALSE, method="mle")
+
+create_comparison_table <- function(fit_yw, fit_mle) {
+  params <- length(fit_yw$ar)
+  
+  df <- data.frame(
+    Parametr = paste0("phi_", 1:params),
+    YW = fit_yw$ar,
+    MLE = fit_mle$ar,
+    Roznica = fit_yw$ar - fit_mle$ar
+  )
+  
+  df <- rbind(df, data.frame(
+    Parametr = "sigma^2",
+    YW = fit_yw$var.pred,
+    MLE = fit_mle$var.pred,
+    Roznica = fit_yw$var.pred - fit_mle$var.pred
+  ))
+  
+  return(df)
+}
+```
+
+```{r estymacja_param2, echo=FALSE, results='asis'}
+xtab_diff <- xtable(create_comparison_table(fit_diff_yw, fit_diff_mle), 
+                    caption = "Porównanie estymatorów YW i MLE dla modelu AR(5) (dane zróżnicowane).",
+                    label = "tab:est_diff", digits = 5)
+print(xtab_diff, include.rownames=FALSE, table.placement="H", comment=FALSE)
+
+xtab_det <- xtable(create_comparison_table(fit_det_yw, fit_det_mle), 
+                   caption = "Porównanie estymatorów YW i MLE dla modelu AR(1) (dane po usunięciu trendu wielomianowego).",
+                   label = "tab:est_det", digits = 5)
+print(xtab_det, include.rownames=FALSE, table.placement="H", comment=FALSE)
+```
+
+**Komentarz do wyników estymacji:**
+Analiza tabel \ref{tab:est_diff} oraz \ref{tab:est_det} wykazuje, że różnice pomiędzy estymatorami uzyskanymi metodą Yule’a-Walkera a metodą MLE są marginalne (rzędu $10^{-3}$). Wynika to z dużej liczebności próby ($N > 170$), dla której estymatory te są praktycznie asymptotycznie równoważne.
+
+Stabilność wyników potwierdza poprawność specyfikacji modeli. Do dalszych etapów analizy (konstrukcja przedziałów ufności, weryfikacja hipotez i prognozowanie) wykorzystane zostaną parametry oszacowane metodą **MLE**, jako posiadające lepsze własności w skończonych próbach.
+
+## d) Asymptotyczne przedziały ufności i weryfikacja istotności
+
+Zgodnie z teorią estymacji procesów autoregresyjnych, estymatory największej wiarogodności (MLE) w dużych próbach mają rozkład asymptotycznie normalny. Pozwala to na wyznaczenie błędów standardowych ($SE$) oraz konstrukcję przedziałów ufności dla parametrów $\phi_i$ według wzoru:
+$$ \hat{\phi}_i \pm u_{1-\alpha/2} \cdot SE(\hat{\phi}_i) $$
+gdzie $u_{1-\alpha/2} \approx 1.96$ dla poziomu istotności $\alpha = 0.05$.
+
+Na tej podstawie zweryfikowano hipotezę zerową $H_0: \phi_i = 0$ (o nieistotności parametru). Jeśli zero nie należy do wyznaczonego przedziału ufności, hipotezę odrzucamy (parametr jest istotny).
+
+```{r przedzialy_ufnosci, echo=TRUE}
+analyze_significance <- function(model_fit) {
+  params <- model_fit$ar
+  
+  cov_mat <- model_fit$asy.var.coef
+  se <- sqrt(diag(cov_mat))
+
+  z_crit <- qnorm(0.975) # ok. 1.96
+  lower <- params - z_crit * se
+  upper <- params + z_crit * se
+
+  is_significant <- ifelse(lower > 0 | upper < 0, "Tak (*)", "Nie")
+
+  df <- data.frame(
+    Parametr = paste0("phi_", 1:length(params)),
+    Estymata = params,
+    SE = se,
+    CI_Dolny = lower,
+    CI_Gorny = upper,
+    Istotny = is_significant
+  )
+  return(df)
+}
+```
+
+```{r przedzialy_ufnosci2, echo=FALSE, results='asis'}
+res_diff <- analyze_significance(fit_diff_mle)
+
+xtab_ci_diff <- xtable(res_diff, 
+                       caption = "Asymptotyczne przedziały ufności dla modelu AR(5) (Dane zróżnicowane).",
+                       label = "tab:ci_diff", digits = 4)
+print(xtab_ci_diff, include.rownames=FALSE, table.placement="H", comment=FALSE)
+
+res_det <- analyze_significance(fit_det_mle)
+
+xtab_ci_det <- xtable(res_det, 
+                      caption = "Asymptotyczne przedziały ufności dla modelu AR(1) (Dane po usunięciu trendu wielomianowego).",
+                      label = "tab:ci_det", digits = 4)
+print(xtab_ci_det, include.rownames=FALSE, table.placement="H", comment=FALSE)
+```
+
+**Wnioski z weryfikacji hipotez:**
+
+1.  **Dla modelu AR(5) (Tabela \ref{tab:ci_diff}):**
+    Analiza przedziałów ufności pokazuje, że wszystkie opóźnienia są statystycznie istotne.
+
+2.  **Dla modelu AR(1) (Tabela \ref{tab:ci_det}):**
+    Parametr $\phi_1$ jest wysoce istotny statystycznie. Potwierdza to występowanie silnej autokorelacji w resztach po usunięciu trendu wielomianowego, którą model AR(1) skutecznie opisuje.
+
+## e) Weryfikacja (na podstawie analizy reszt) poprawności dopasowania
+
+Ostatnim, kluczowym etapem modelowania jest diagnostyka reszt. Prawidłowo zbudowany model powinien pozostawić reszty będące realizacją procesu **Białego Szumu**. Oznacza to, że reszty powinny być nieskorelowane oraz posiadać rozkład zbliżony do normalnego.
+
+W celu weryfikacji modeli **AR(5)** oraz **AR(1)**, wyestymowanych metodą MLE, przeprowadzono analizę wizualną oraz formalne testy statystyczne.
+
+### Analiza wizualna reszt
+
+Sporządzono wykresy funkcji autokorelacji (ACF) reszt, aby sprawdzić, czy nie pozostały w nich istotne zależności, oraz wykresy kwantylowe (Q-Q Plot) w celu oceny normalności rozkładu.
+
+```{r diagnostyka_wizualna, echo=FALSE, fig.height=6, fig.width=7, fig.cap="\\label{fig:diag_resid}Diagnostyka reszt: ACF (lewa kolumna) i Q-Q Plot (prawa kolumna). Górny wiersz: AR(5) Różnicowanie, Dolny wiersz: AR(1) trend wielomianowy."}
+resid_diff <- na.omit(fit_diff_mle$resid)
+resid_det <- na.omit(fit_det_mle$resid)
+
+par(mfrow=c(2,2))
+
+acf(resid_diff, main="ACF reszt: AR(5)", lag.max=20, ylim=c(-0.5, 0.5))
+qqnorm(resid_diff, main="Q-Q Plot: AR(5)")
+qqline(resid_diff, col="red", lwd=2)
+
+acf(resid_det, main="ACF reszt: AR(1)", lag.max=20, ylim=c(-0.5, 0.5))
+qqnorm(resid_det, main="Q-Q Plot: AR(1)")
+qqline(resid_det, col="red", lwd=2)
+
+par(mfrow=c(1,1))
+```
+
+**Wnioski wizualne (Rysunek \ref{fig:diag_resid}):**
+
+1.  **Autokorelacja (ACF):** Dla obu modeli słupki autokorelacji mieszczą się niemal idealnie w granicach przedziałów ufności (oczywiście poza słupkiem dla argumentu zero). Świadczy to o tym, że oba modele skutecznie "wyczyściły" szereg z zależności czasowych.
+2.  **Normalność (Q-Q Plot):** Punkty na wykresach kwantylowych układają się dosyć dokładnie wzdłuż czerwonej linii teoretycznej, nawet na krańcach rozkładu. Sugeruje to, że rozkład reszt jest bardzo zbliżony do normalnego, co jest sytuacją bardzo pożądaną.
+
+### Testy statystyczne (Białoszumowość)
+
+Weryfikację wizualną uzupełniono testami statystycznymi:\
+
+* **Test Ljung-Boxa:** $H_0$: Reszty są nieskorelowane.
+* **Test Shapiro-Wilka:** $H_0$: Reszty mają rozkład normalny.
+
+```{r testy_bialoszumowosci, echo=TRUE, results='asis'}
+run_residual_tests <- function(residuals, model_name) {
+  lb_test <- Box.test(residuals, lag = 10, type = "Ljung-Box")
+  sw_test <- shapiro.test(residuals)
+  
+  data.frame(
+    Model = model_name,
+    `Ljung-Box (stat)` = lb_test$statistic,
+    `Ljung-Box (p-val)` = lb_test$p.value,
+    `Shapiro-Wilk (p-val)` = sw_test$p.value
+  )
+}
+
+diag_results <- rbind(
+  run_residual_tests(resid_diff, "AR(5) - Zróżnicowane"),
+  run_residual_tests(resid_det, "AR(1) - Z usuniętym trendem wielomianowym")
+)
+
+xtab_diag <- xtable(diag_results, 
+                    caption = "Wyniki testów diagnostycznych reszt (Ljung-Box i Shapiro-Wilk).",
+                    label = "tab:diag_tests", digits = 4)
+print(xtab_diag, include.rownames=FALSE, table.placement="H", comment=FALSE)
+```
+
+**Interpretacja wyników testów (Tabela \ref{tab:diag_tests}):**
+
+1.  **Brak autokorelacji (Ljung-Box):**
+    Zarówno dla modelu AR(5) ($p \approx 0.99$), jak i AR(1) ($p \approx 0.83$), wartości p-value są bardzo wysokie (znacznie powyżej poziomu istotności $\alpha = 0.05$).
+    * **Wniosek:** Nie ma podstaw do odrzucenia hipotezy zerowej. Reszty są w pełni **nieskorelowane**. Oznacza to, że oba modele poprawnie opisały strukturę zależności czasowej w danych.
+
+2.  **Normalność rozkładu (Shapiro-Wilk):**
+    W badanym przypadku testy **nie odrzucają hipotezy o normalności**.
+    * Dla AR(5): $p \approx 0.49 > 0.05$.
+    * Dla AR(1): $p \approx 0.50 > 0.05$.
+    * **Wniosek:** Reszty mają rozkład zbliżony do normalnego.
+
+**Podsumowanie diagnostyki:**
+Oba modele przeszły weryfikację wzorowo. Spełniają one rygorystyczne założenia białoszumowości (brak korelacji oraz gaussowski charakter reszt). Ze względu na nieco wyższe p-value w teście Ljung-Boxa, model **AR(5)** dla danych zróżnicowanych wydaje się minimalnie lepiej dopasowany, ale oba są w pełni poprawne statystycznie.
+
+## f) Szczegółowa prognoza i porównanie podejść
+
+W tej sekcji przeprowadzono prognozę na horyzont $h=10$ lat (2024–2033). Aby dokładnie przeanalizować różnice metodyczne, rozbito proces na cztery osobne wizualizacje, obejmujące zarówno podejście "ręczne" (rekonstrukcja zmiennej), jak i automatyczne (ARIMA), a także porównanie z modelem deterministycznym.
+
+### Przygotowanie danych i obliczenia
+W pierwszej kolejności wykonano obliczenia prognoz. Dla modelu stochastycznego manualnego oraz modelu deterministycznego wyznaczamy jedynie prognozy punktowe (bez przedziałów ufności), aby skupić się na porównaniu ścieżek trendu.
+
+```{r obliczenia_f, echo=TRUE, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(forecast)
+h <- 10
+future_years <- seq(end(gtemp_both)[1] + 1, length.out = h)
+
+pred_diff_manual <- predict(fit_diff_mle, n.ahead = h)
+
+last_val <- as.numeric(tail(gtemp_both, 1))
+forecast_manual_stoch <- last_val + cumsum(pred_diff_manual$pred)
+
+model_arima_auto <- Arima(gtemp_both, order=c(5,1,0), include.drift=TRUE)
+fcast_auto <- forecast(model_arima_auto, h=h, level=95)
+
+pred_resid <- predict(fit_det_mle, n.ahead = h)
+coef_trend <- coef(model_trend)
+
+t_start <- time(gtemp_both)[length(gtemp_both)]
+t_seq <- seq(t_start + 1, length.out = h)
+trend_vals <- coef_trend[1] + coef_trend[2]*t_seq + coef_trend[3]*t_seq^2
+
+forecast_manual_det <- trend_vals + pred_resid$pred
+
+df_hist <- data.frame(
+  Rok = as.numeric(time(gtemp_both)),
+  Wartosc = as.numeric(gtemp_both),
+  Typ = "Historia"
+)
+df_hist <- subset(df_hist, Rok >= 2005)
+
+df_p1 <- data.frame(
+  Rok = future_years, 
+  Wartosc = as.numeric(forecast_manual_stoch)
+)
+
+df_p2 <- data.frame(
+  Rok = future_years, 
+  Wartosc = as.numeric(fcast_auto$mean), 
+  Lower = as.numeric(fcast_auto$lower), 
+  Upper = as.numeric(fcast_auto$upper)
+)
+
+df_p3 <- data.frame(
+  Rok = future_years, 
+  Wartosc = as.numeric(forecast_manual_det)
+)
+```
+
+\newpage
+
+### Analiza wizualna prognoz
+
+Poniżej przedstawiono cztery ujęcia prognozowanego zjawiska.
+
+**Wariant 1: Podejście stochastyczne (Obliczenia ręczne)**
+
+Pierwszy wykres prezentuje "czystą" ścieżkę prognozy uzyskaną poprzez zsumowanie prognozowanych przyrostów z modelu AR(5). Metoda ta pokazuje najbardziej prawdopodobny scenariusz wynikający z dynamiki procesu, startując od ostatniej obserwacji.
+
+```{r wykres_f1, echo=FALSE, fig.height=5, fig.width=7, fig.cap="\\label{fig:f1}Prognoza ręczna z modelu AR(5) (punktowa)."}
+ggplot() +
+  geom_line(data=df_hist, aes(x=Rok, y=Wartosc), color="black", alpha=0.5) +
+  geom_line(data=df_p1, aes(x=Rok, y=Wartosc), color="blue", size=1.2) +
+  geom_point(data=df_p1, aes(x=Rok, y=Wartosc), color="blue") +
+  labs(title="1. Model różnicowy (Obliczenia ręczne)", subtitle="Rekonstrukcja zmiennej (prognoza punktowa)", y="Odchylenie [°C]") +
+  theme_minimal()
+```
+
+\newpage
+
+**Wariant 2: Podejście stochastyczne (ARIMA z przedziałami ufności)**
+W tym ujęciu wykorzystano funkcję `forecast` dla modelu ARIMA(5,1,0). Kluczowym elementem jest tutaj "rozszerzający się" przedział ufności. Wynika on z faktu, że dla procesu zintegrowanego wariancja błędu prognozy rośnie liniowo wraz z horyzontem czasu. Ten wykres prezentujemy z przedziałami ufności jako punkt odniesienia dla niepewności prognozy.
+
+```{r wykres_f2, echo=FALSE, fig.height=5, fig.width=7, fig.cap="\\label{fig:f2}Prognoza ARIMA(5,1,0) z rosnącym przedziałem ufności."}
+ggplot() +
+  geom_line(data=df_hist, aes(x=Rok, y=Wartosc), color="black", alpha=0.5) +
+  geom_ribbon(data=df_p2, aes(x=Rok, ymin=Lower, ymax=Upper), fill="blue", alpha=0.2) +
+  geom_line(data=df_p2, aes(x=Rok, y=Wartosc), color="blue", size=1.2, linetype="dashed") +
+  labs(title="2. Model różnicowy (Automat ARIMA)", 
+       subtitle="Przedziały ufności uwzględniające niestacjonarność procesu", 
+       y="Odchylenie temperatury [°C]") +
+  theme_minimal()
+```
+
+\newpage
+
+**Wariant 3: Podejście deterministyczne (Trend + AR)**
+Wykres trzeci przedstawia prognozę opartą na ekstrapolacji trendu wielomianowego (paraboli).
+
+```{r wykres_f3, echo=FALSE, fig.height=5, fig.width=7, fig.cap="\\label{fig:f3}Prognoza deterministyczna: Trend wielomianowy + AR(1)."}
+ggplot() +
+  geom_line(data=df_hist, aes(x=Rok, y=Wartosc), color="black", alpha=0.5) +
+  geom_line(data=df_p3, aes(x=Rok, y=Wartosc), color="red", size=1.2) +
+  labs(title="3. Model Trendu + AR(1) (Obliczenia ręczne)", 
+       subtitle="Ekstrapolacja trendu kwadratowego skorygowana o prognozę reszt", 
+       y="Odchylenie temperatury [°C]") +
+  theme_minimal()
+```
+
+\newpage
+
+**Wariant 4: Bezpośrednie porównanie**
+Zestawienie obu podejść (manualnego stochastycznego i deterministycznego) w formie czystych linii prognozy pozwala na wyraźne porównanie ich dynamiki. Model deterministyczny (czerwony) przewiduje szybszy, nieliniowy wzrost temperatur ("ucieczkę" w górę) ze względu na kwadratową naturę trendu. Model stochastyczny (niebieski) jest bardziej liniowy w swojej strukturze.
+
+```{r wykres_f4, echo=FALSE, fig.height=5, fig.width=7, fig.cap="\\label{fig:f4}Porównanie podejścia stochastycznego i deterministycznego."}
+ggplot() +
+  geom_line(data=df_hist, aes(x=Rok, y=Wartosc), color="black", alpha=0.3) +
+  geom_line(data=df_p1, aes(x=Rok, y=Wartosc, color="Stochastyczny (Manual)"), size=1) +
+  geom_line(data=df_p3, aes(x=Rok, y=Wartosc, color="Deterministyczny (Trend)"), size=1, linetype="dashed") +
+  scale_color_manual(values=c("red", "blue")) +
+  labs(title="4. Porównanie: Manual Stochastyczny vs Deterministyczny", 
+       subtitle="Niebieski: Różnicowanie (AR5) | Czerwony: Trend kwadratowy + AR(1)", 
+       y="Odchylenie temperatury [°C]", 
+       color="Model") +
+  theme_minimal() +
+  theme(legend.position="bottom")
+```
+
+\newpage
+
+## g) Końcowe wnioski i podsumowanie
+
+Przeprowadzona analiza szeregu czasowego globalnych anomalii temperatury (zbiór `gtemp_both`) pozwoliła na porównanie dwóch odmiennych podejść do modelowania procesów niestacjonarnych: podejścia stochastycznego (różnicowanie) oraz deterministycznego (usunięcie trendu wielomianowego).
+
+**Porównanie dopasowania i diagnostyki:**
+
+1.  **Stacjonarność:** Obie metody skutecznie sprowadziły szereg do postaci stacjonarnej. Testy ADF i KPSS potwierdziły, że zarówno jednokrotne różnicowanie ($d=1$), jak i usunięcie trendu kwadratowego wyeliminowało niestacjonarność w średniej.
+2.  **Struktura modelu:**
+    * Dla danych zróżnicowanych zidentyfikowano model **AR(5)**. Jest to model bardziej złożony, co wynika z konieczności opisania dynamiki krótkoterminowych zmian.
+    * Dla danych po usunięciu trendu kwadratowego najlepszy okazał się model **AR(1)**, co sugeruje, że większość "informacji" o procesie została zawarta w deterministycznym trendzie wielomianowym.
+3.  **Diagnostyka reszt:** Oba modele przeszły pomyślnie testy białoszumowości (Ljung-Box). Co istotne, w obu przypadkach reszty wykazywały rozkład zbliżony do normalnego, co jest wynikiem bardzo dobrym jak na dane środowiskowe.
+
+**Wnioski z prognoz (2024–2033):**
+
+1.  **Kierunek zmian:** Niezależnie od przyjętej metodyki, oba modele prognozują dalszy, wyraźny wzrost średniej temperatury globalnej w najbliższej dekadzie.
+2.  **Różnice w scenariuszach:**
+    * Podejście **deterministyczne (Trend kwadratowy)** generuje prognozy wyższe ("pesymistyczne"), zakładając stałe przyspieszenie ocieplenia wynikające z natury funkcji kwadratowej.
+    * Podejście **stochastyczne (Różnicowanie/ARIMA)** jest bardziej "ostrożne" i adaptacyjne. Jego prognoza w większym stopniu zależy od ostatniej dynamiki przyrostów, a przedziały ufności słusznie rozszerzają się wraz z horyzontem prognozy, odzwierciedlając rosnącą niepewność procesów skumulowanych.
+
+**Rekomendacja:**
+Biorąc pod uwagę naturę zjawisk klimatycznych (które rzadko podążają idealnie po sztywnych krzywych matematycznych w długim okresie) oraz poprawność diagnostyczną, model **stochastyczny (ARIMA/Różnicowanie)** wydaje się bezpieczniejszym narzędziem do prognozowania krótkoterminowego, gdyż lepiej oddaje losową naturę zmienności klimatu i nie narzuca naiwnego kształtu wzrostu "w nieskończoność", jak robi to wielomian. Niemniej jednak, zgodność obu prognoz co do kierunku zmian jest silnym sygnałem potwierdzającym trend ocieplenia.
+
+\newpage
+
+# Zadanie 4 - Porównanie dokładności prognoz dla danych euretail
+
+```{r}
+data("euretail")
+```
+
+## Wstęp 
+
+Cel zadania: porównanie dokładności prognoz skonstruowanych na bazie
+modeli (S)ARIMA, modeli dekompozycji oraz algorytmów wygładzania wykładniczego
+dla danych `euretail` (pakiet `fpp2`) zawierających kwartalne wartości indeksu handlu
+detalicznego (ang. retail trade index) dla strefy euro.
+
+## Podział danych na część uczącą i testową
+
+Zacznijmy od sprawdzenia zakresu naszych danych:
+
+```{r zakres, echo=TRUE}
+start(euretail)
+end(euretail)
+length(euretail)
+```
+
+Spójrzmy na wykres:
+
+```{r wykres, fig.cap="\\label{fig:baza}Wykres szeregu czasowego euretail"}
+
+autoplot(euretail) +
+  ggtitle("Indeks handlu detalicznego w strefie euro") +
+  xlab("Czas (lata)") +
+  ylab("Wartość indeksu")
+```
+
+Możemy zauważyć, że po roku 2008 występuje gwałtowne załamanie trendu wzrostowego.
+
+Dane `euretail` są typu kwartalnego, zatem możemy je podzielić na podstawie liczby kwartałów. Zbiór testowy powinien stanowić około 20% całkowitej długości. W naszym przypadku 20% to `r length(euretail)*0.2 ` kwartałów. Niech zatem naszym zbiorem testowym będzie ostatnie 12 kwartałów, czyli 3 lata. 
+
+```{r podział}
+train.retail <- subset(euretail, end = length(euretail) - 12)
+test.retail <- subset(euretail, start = length(euretail) - 11)
+ 
+```
+
+## Dopasowanie odpowiednich modeli do danych
+
+
+Przyjrzyjmy się wykresowi dla zbioru uczącego.
+
+```{r wykres_baza, fig.cap="\\label{fig:trening}Wykres szeregu czasowego dla zbioru uczącego euretail"}
+
+autoplot(train.retail) +
+  ggtitle("Zbiór treningowy szeregu euretail") +
+  xlab("Czas (lata)") +
+  ylab("Wartość indeksu")
+```
+
+Warto zauważyć, że przyjęty podział danych sprawił, iż zbiór uczący kończy się tuż przed wyraźnym załamaniem trendu wzrostowego (widocznym na wykresie \ref{fig:baza}). Modele klasy SARIMA oraz ETS opierają się na ekstrapolacji dotychczasowych tendencji, można zatem postawić hipotezę, że wyznaczone prognozy będą obarczone znacznym błędem wynikającym z braku informacji o zmianie strukturalnej trendu w danych treningowych.
+
+
+```{r}
+lambda.bc <- BoxCox.lambda(train.retail, "loglik") 
+```
+
+W celu stabilizacji wariancji szeregu czasowego zastosujemy transformację Boxa-Coxa. Optymalna wartość parametru $\lambda$ została wyznaczona metodą największej wiarygodności  i wyniosła $\lambda=$ `r lambda.bc`.
+
+
+```{r boxcox, fig.cap="\\label{fig:boxcox}Wykres szeregu czasowego dla zbioru uczącego euretail po transformacji Boxa-Coxa"}
+train.retail.bc <- BoxCox(train.retail, lambda=lambda.bc)
+autoplot(train.retail.bc)+
+  ggtitle("Zbiór treningowy szeregu euretail po transformacji Boxa-Coxa") +
+  xlab("Czas (lata)") +
+  ylab("Wartość indeksu po transformacji")
+```
+
+Po transformacji Boxa-Coxa wizualnie niewiele się zmieniło. Jednakże jej zastosowanie jest uzasadnione z punktu widzenia statystycznego. Pozwala ona na lepsze spełnienie założenia o homoskedastyczności i normalności składnika losowego w dalszych etapach modelowania, co przekłada się na bardziej rzetelną estymację przedziałów ufności prognoz.
+
+Teraz wykorzystamy funkcje `ndiffs` i `nsdiffs` aby sprawdzić jakie różnicowania wykonać.
+
+```{r roznicowanie, echo=TRUE}
+d<-ndiffs(train.retail.bc)    
+
+D<-nsdiffs(train.retail.bc)   
+```
+
+Otrzymaliśmy wartości d = `r d` i D = `r D`. Zatem wykonamy jednokrotne różnicowanie zwykłe i jednokrotne różnicowanie sezonowe (z opóźnieniem 4, ze względu na kwartalny charakter danych). Warto również podkreślić, że dodatnia wartość `D` daje nam sygnał, że w danych występuje sezonowość. Z tego powodu skupimy się na modelach `SARIMA`.
+
+
+```{r analiza_auto, fig.cap="\\label{fig:analiza_auto}Analiza autokorelacji szeregu po różnicowaniu zwykłym (d=1) i sezonowym (D=1)"}
+
+train.diff <- diff(diff(train.retail.bc, lag = 4), differences = 1)
+
+ggtsdisplay(train.diff, main = "Analiza autokorelacji")
+```
+
+Wykres \ref{fig:analiza_auto} pozwala ocenić skuteczność przeprowadzonego różnicowania. Brak wyraźnych trendów na wykresie czasowym oraz szybkie wygasanie funkcji ACF i PACF sugerują, że szereg stał się stacjonarny i jest gotowy do estymacji parametrów modelu. Widzimy jedynie istotne słupki dla opóźnienia 4, zatem mamy potwierdzenie, że w danych występuje sezonowość i użycie SARIMA jest uzasadnione.
+
+Warto również sprawdzić średnią, która wskaże nam czy należy uwzględnić dryf.
+
+```{r mean, echo=TRUE}
+mean(train.diff)
+```
+
+Fakt, że średnia ta wyraźnie odbiega od zera, jest przesłanką do uwzględnienia stałej (dryfu) w modelu SARIMA. 
+
+
+### SARIMA
+
+#### Wybór parametrów
+
+Model `SARIMA` opisujemy siedmioma parametrami `(p, d, q)(P, D, Q)[s]`.
+
+Częstotliwość sezonowa `[s]` - określa liczbę obserwacji, po których cykl sezonowy się powtarza. Dla euretail: 
+
+* `s` = 4.
+
+Część trendu `(p, d, q)` – co dzieje się między sąsiednimi kwartałami (opóźnienia 1-3):
+
+* `d` (różnicowanie): U nas `d` = 1, bo wykonaliśmy jednokrotne różnicowanie zwykłe.
+
+* `p` (autoregresja): decyduje o niej zachowanie wykresu PACF dla niskich opóźnień (1-3). U nas od początku są poniżej poziomu istotności, stąd p = 0.
+
+* `q` (średnia ruchoma): decyduje o niej zachowanie wykresu ACF dla niskich opóźnień (1-3). Tutaj ponownie q = 0, gdyż początkowe słupki nie są istotne.
+
+
+Część sezonowa `(P, D, Q)` – co dzieje się między tymi samymi kwartałami rok do roku (opóźnienia 4, 8, 12):
+
+* `D` (różnicowanie sezonowe): Wybieramy `D` = 1, bo wykonaliśmy jednokrotne różnicowanie sezonowe.
+
+* `P` (sezonowa autoregresja): Wyraźny pojedynczy słupek w t = 4 na wykresie PACF sugeruje `P` = 1. Oprócz tego przetestujemy wariant `P` = 0.
+
+* `Q` (sezonowa średnia ruchoma): Na wykresie ACF wystaje duży słupek dla opóźnienia 4. Sprawdzimy więc `Q` = 1 jak i `Q` = 0.
+
+Porównamy następujące modele:
+
+* Pierwszy model `SARIMA(0,1,0)(0,1,1)[4]`
+* Drugi model `SARIMA(0,1,0)(1,1,0)[4]`
+* Trzeci model `SARIMA(0,1,0)(1,1,1)[4]`
+* Czwarty model `SARIMA` - automatyczny
+
+
+#### Kryteria oceny skuteczności
+
+Do oceny skuteczności modelu wspomożemy się dwoma kryteriami: 
+
+* AICc (Akaike Information Criterion - corrected) - Wskazuje model, który daje najlepsze prognozy nawet jeśli model jest złożony. 
+
+* BIC (Bayesian Information Criterion) Zazwyczaj wybiera modele prostsze (oszczędniejsze) niż AICc.
+
+W przypadku obu - mniejszy wynik to lepsza skuteczność.
+
+
+```{r sarima_modele}
+
+fit1 <- Arima(train.retail, 
+              order = c(0, 1, 0), 
+              seasonal = list(order = c(0, 1, 1), period = 4), 
+              lambda = lambda.bc)
+
+
+fit2 <- Arima(train.retail, 
+              order = c(0, 1, 0), 
+              seasonal = list(order = c(1, 1, 0), period = 4), 
+              lambda = lambda.bc)
+
+fit3 <- Arima(train.retail, 
+              order = c(0, 1, 0), 
+              seasonal = list(order = c(1, 1, 1), period = 4), 
+              lambda = lambda.bc)
+
+fit4 <- auto.arima(train.retail, lambda = lambda.bc, stepwise=FALSE, approximation=FALSE)
+
+aicc_results <- data.frame(
+  Model = c("SARIMA(0,1,0)(0,1,1)", 
+            "SARIMA(0,1,0)(1,1,0)", 
+            "SARIMA(0,1,0)(1,1,1)",
+            "Auto-ARIMA"),
+  AICc = c(fit1$aicc, fit2$aicc, fit3$aicc, fit4$aicc),
+  BIC = c(fit1$bic, fit2$bic, fit3$bic, fit4$bic)
+)
+
+kable(aicc_results, 
+      col.names = c("Specyfikacja modelu", "Wartość AICc", "Wartość BIC"),
+      digits = 2,
+      caption = "Porównanie kryterium informacyjnego AICc i BIC dla wybranych modeli SARIMA",
+      booktabs = TRUE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = F, 
+                position = "center") 
+```
+
+Pod względem AICc mamy dwie podobne niskie wartości dla modelu pierwszego o parametrach `P=0`, `Q=1` i trzeciego `P=1`, `Q=1`.
+Jednakże BIC, zgodnie z oczekiwaniami, wskazuje na wybór prostszego modelu pierwszego o parametrach `P=0` i `Q=1`.
+
+#### Sprawdzenie istotności współczynników
+
+Sprawdźmy, czy współczynnik jest istotny.
+
+```{r, echo=TRUE}
+lmtest::coeftest(fit1)
+```
+
+Otrzymany wynik (`***`) testu istotności potwierdza, że współczynnik sezonowej średniej ruchomej `Q = 1` (oznaczony jako `sma1`) jest istotny statystycznie (`p<0,001`), jeśli za poziom istotności przyjmiemy $\alpha=0.05$.
+
+#### Dodanie dryfu
+
+```{r drift}
+fit1_drift <- Arima(train.retail, 
+                    order = c(0, 1, 0), 
+                    seasonal = list(order = c(0, 1, 1), period = 4), 
+                    lambda = lambda.bc, 
+                    include.drift = TRUE)
+
+drift_comparison <- data.frame(
+  Model = c("SARIMA(0,1,0)(0,1,1)", "SARIMA(0,1,0)(0,1,1) z dryfem"),
+  AICc = c(fit1$aicc, fit1_drift$aicc),
+  BIC = c(fit1$bic, fit1_drift$bic)
+)
+
+kable(drift_comparison, 
+      col.names = c("Specyfikacja", "Wartość AICc", "Wartość BIC"),
+      digits = 2,
+      caption = "Wpływ uwzględnienia parametru dryfu na jakość modelu SARIMA",
+      booktabs = TRUE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = F, 
+                position = "center")
+```
+
+Warto zauważyć, że próba włączenia dryfu do modelu fit1 nie zmieniła jego parametrów. Jest to zgodne z dokumentacją funkcji Arima(), która stwierdza: 'if there is more than one difference taken, no constant is included [...] as otherwise quadratic and higher order polynomial trends would be induced'. Ponieważ w analizowanym modelu zastosowano d=1 i D=1, algorytm słusznie pominął stałą, chroniąc prognozę przed niestabilnym trendem kwadratowym.
+
+#### Wykres reszt i test Ljungi-Boxa
+
+\clearpage
+
+```{r reszty, fig.cap="\\label{fig:analiza_reszty_sarima}Analiza reszt i opóźnień w najlepszym modelu SARIMA", fig.pos = "H"}
+checkresiduals(fit1)
+```
+
+Jak widzimy na wykresie \ref{fig:analiza_reszty_sarima} wszystkie słupki opóźnień mieszczą się w przedziale ufności. Ponadto histogram przypomina kształt dzwonu, co sugeruje, że założenie o normalności rozkładu składnika losowego jest w przybliżeniu spełnione. Jednakże pojedyncze kreski daleko od centrum (np. te w okolicach -100) potwierdzają obecność nietypowych zdarzeń w danych.
+
+
+### ETS
+
+W tej części analizujemy modele klasy ETS (Error, Trend, Seasonal). Zamiast polegać wyłącznie na algorytmie, przetestujemy dwa podejścia: 
+
+* automatyczny dobór struktury
+* model zadeklarowany ręcznie na podstawie charakterystyki danych euretail
+
+Wybierzemy model `ETS(A,A,A)`, czyli klasyczną metodę Holta-Wintersa. Jest to model, który najlepiej pasuje do naszych danych, bo rozkłada szereg na trzy logiczne części, z których każda jest traktowana jako stała wartość (addytywnie):
+
+* Pierwsze A (Error): Przyjmujemy addytywny rozkład błędów, co oznacza, że losowe wahania wokół trendu mają stałą rozpiętość.
+
+* Drugie A (Trend): Zakładamy trend liniowy – handel detaliczny w naszym zbiorze treningowym rośnie w miarę stałym tempie.
+
+* Trzecie A (Seasonality): Wybieramy addytywną sezonowość, ponieważ po zastosowaniu transformacji Boxa-Coxa wahania kwartalne zostały wyrównane i mają podobną skalę w całym okresie.
+
+```{r ETS, echo=TRUE}
+fit_ets_auto <- ets(train.retail, lambda = lambda.bc)
+
+fit_ets_manual <- ets(train.retail, model = "AAA", lambda = lambda.bc)
+```
+
+Spójrzmy na wartości kryteriów informacyjnych dla wybranych przez nas modeli.
+
+```{r porownanie_ETS}
+
+ets_comp <- data.frame(
+  Model = c(paste("ETS Auto:", model_name <- fit_ets_auto$method), "ETS(A,A,A)"),
+  AICc = c(fit_ets_auto$aicc, fit_ets_manual$aicc),
+  BIC = c(fit_ets_auto$bic, fit_ets_manual$bic)
+)
+
+kable(ets_comp, digits = 2, caption = "Porównanie kryteriów informacyjnych dla automatycznego i ręcznego modelu ETS") %>%
+  kable_styling(full_width = F)
+```
+
+Warto zauważyć, że algorytm automatycznego doboru modelu `ets()` wskazał na strukturę `ETS(A,A,A)` jako optymalną, co jest w pełni zgodne z modelem zadeklarowanym ręcznie. Identyczne wartości kryteriów AICc i BIC dla obu podejść potwierdzają, że addytywna metoda Holta-Wintersa najlepiej oddaje strukturę szeregu euretail po transformacji Boxa-Coxa.
+
+Spojrzmy również na miary dokładności prognoz.
+
+```{r miary}
+accuracy_ets <- rbind(
+  ETS_auto = accuracy(fit_ets_auto),
+  ETS_manual = accuracy(fit_ets_manual)
+)
+
+rownames(accuracy_ets) <- c("ETS Auto", "ETS(A,A,A)")
+
+kable(accuracy_ets, 
+      digits = 3, 
+      caption = "Błędy dopasowania ETS (zbiór uczący)",
+      booktabs = TRUE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F)
+```
+
+
+```{r, fig.cap="\\label{fig:analiza_reszty_ets}Analiza reszt i opóźnień w najlepszym modelu ETS"}
+checkresiduals(fit_ets_auto)
+```
+
+Analiza diagnostyczna \ref{fig:analiza_reszty_ets} modelu `ETS(A,A,A)` potwierdza jego wysoką jakość. Wykres ACF nie wykazuje istotnych korelacji (wszystkie słupki mieszczą się w przedziale ufności), a wynik testu Ljungi-Boxa z wartością p-value = 0.6255 (powyżej $\alpha=0.05$) pozwala przyjąć hipotezę o braku autokorelacji reszt. Oznacza to, że model poprawnie wydobył sygnał z danych, a pozostałe błędy mają charakter białego szumu.
+
+W celu rozszerzenia analizy poza automatyczne algorytmy, przyjrzymy się klasycznym metodom wygładzania wykładniczego: metodzie Holta oraz metodzie Holta-Wintersa w wariancie addytywnym. Pozwala to na bezpośrednią kontrolę nad strukturą trendu i sezonowości, niezależnie od statystycznej optymalizacji stosowanej w funkcji `ets()`.
+
+Pomijamy wariant multiplikatywny metody Holta-Wintersa, ponieważ transformacja Boxa-Coxa ustabilizowała wariancję szeregu, więc sezonowość ma charakter addytywny.
+
+```{r klasyczne}
+
+model.holt <- holt(train.retail, h = 12, lambda = lambda.bc)
+
+model.hw.add <- hw(train.retail, seasonal = "additive", h = 12, lambda = lambda.bc)
+
+
+accuracy_klasyczne <- rbind(
+  Holt = accuracy(model.holt),
+  HW_Add = accuracy(model.hw.add)
+)
+
+rownames(accuracy_klasyczne) <- c("Metoda Holta (Trend)", "Metoda Holta-Wintersa (Trend+Sezon)")
+
+kable(accuracy_klasyczne, 
+      digits = 3, 
+      caption = "Błędy dopasowania klasycznych metod wygładzania (zbiór uczący)",
+      booktabs = TRUE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F)
+```
+
+Jak widzimy w tabeli \ref{tab:klasyczne}, pominięcie komponentu sezonowego w metodzie Holta skutkuje znacznym wzrostem błędów dopasowania (RMSE wzrasta z 0.37 do 0.50). Potwierdza to wcześniejsze przypuszczenia o silnej sezonowości szeregu euretail i zasadności stosowania wyłącznie metod sezonowych w dalszej części prognozowania.
+
+Ponadto analiza miar dokładności wykazała, że modele `ETS(A,A,A)` oraz Holt-Winters generują identyczne wyniki. Świadczy to o ich matematycznej równoważności w kontekście analizowanego szeregu `euretail.` Spodziewamy się zatem, że obie metody wygenerują identyczne prognozy punktowe oraz przedziały ufności, co ostatecznie potwierdzi, że model `ETS` jest statystycznym uogólnieniem klasycznego algorytmu Holta-Wintersa.
+
+Spojrzmy jeszcze na wykres reszt dla metody Holta-Wintersa.
+
+```{r, fig.cap="\\label{fig:analiza_reszty_hw}Analiza reszt i opóźnień w modelu Holta-Wintersa"}
+checkresiduals(model.hw.add)
+```
+Widzimy, że wykresy reszt dla Holta-Wintersa są identyczne do wykresów reszt dla modelu `ETS(A,A,A)`.
+
+### TSLM
+
+W tej części zbudujemy model TSLM, które traktuje szereg czasowy jako sumę trendu i sezonowości. Jest to klasyczne podejście do dekompozycji szeregu. 
+
+
+```{r tslm, echo=TRUE}
+fit_tslm2 <- tslm(train.retail.bc ~ trend + season)
+fc_tslm2_bc <- forecast::forecast(fit_tslm2, h = 12)
+
+fc_tslm2 <- fc_tslm2_bc
+fc_tslm2$mean  <- InvBoxCox(fc_tslm2_bc$mean, lambda = lambda.bc)
+fc_tslm2$lower <- InvBoxCox(fc_tslm2_bc$lower, lambda = lambda.bc)
+fc_tslm2$upper <- InvBoxCox(fc_tslm2_bc$upper, lambda = lambda.bc)
+fc_tslm2$x     <- train.retail
+```
+
+Model TSLM został dopasowany do danych przetransformowanych parametrem $\lambda$. Uwzględnienie komponentu `season` pozwala na odwzorowanie kwartalnych wahań indeksu, których nie byłby w stanie wychwycić prosty trend liniowy. Prognozy zostały następnie sprowadzone do oryginalnych jednostek za pomocą funkcji InvBoxCox.
+
+
+```{r tslm_reszty, fig.cap="\\label{fig:analiza_reszty_tslm}Analiza reszt i opóźnień w modelu TSLM"}
+checkresiduals(fit_tslm2)
+```
+
+Analiza reszt modelu TSLM wykazała bardzo niską wartość p-value (p<0.001), co pozwala na odrzucenie hipotezy o braku autokorelacji. Wykres ACF wyraźnie pokazuje istotne statystycznie korelacje dla niskich opóźnień. Oznacza to, że model TSLM nie zdołał wydobyć wszystkich informacji z szeregu czasowego, co tłumaczy jego niską precyzję prognostyczną na tle modeli klasy ETS i SARIMA. Model ten zbytnio upraszcza dynamikę indeksu euretail, traktując go jedynie jako sztywną kombinację trendu i sezonowości.
+
+
+## Wyznaczenie prognoz dla zbioru testowego na podstawie dopasowanych modeli oraz wybranej metody referencyjnej
+
+W niniejszym punkcie zajmiemy się przedstawieniem prognoz dla wybranych przez nas modeli i jednej metody naiwnej. W przypadku danych z silną sezonowością, najrozsądniejszym wyborem jest metoda sezonowa naiwna (`snaive`). Zakłada ona, że prognoza na dany kwartał będzie identyczna jak wartość w tym samym kwartale poprzedniego roku.
+
+```{r}
+sarima_model <- fit1
+ets_model    <- fit_ets_auto
+ets_hw_model <- model.hw.add
+tslm_model   <- fit_tslm2
+```
+
+
+```{r, prognozy}
+snaive_fc <- snaive(train.retail, h = 12)
+sarima_fc <- forecast::forecast(sarima_model, h = 12)
+ets_fc    <- forecast::forecast(ets_model, h = 12)
+tslm_fc   <- fc_tslm2 
+hw_fc     <- forecast::forecast(ets_hw_model, h = 12)
+```
+
+```{r, fig.cap="\\label{fig:forecast_snaive}Wykres prognozy naiwnej z sezonowością SNAIVE"}
+plot(snaive_fc, main = "Prognoza SNAIVE (Benchmark)", xlab = "Rok", ylab = "Indeks")
+```
+
+```{r, fig.cap="\\label{fig:forecast_sarima}Wykres prognozy modelu SARIMA(0,1,0)(0,1,1)[4]"}
+plot(sarima_fc, main = "Prognoza SARIMA", xlab = "Rok", ylab = "Indeks")
+```
+
+```{r, fig.cap="\\label{fig:forecast_ets}Wykres prognozy modelu ETS(A,A,A)"}
+plot(ets_fc, main = "Prognoza ETS",    xlab = "Rok", ylab = "Indeks")
+```
+
+```{r, fig.cap="\\label{fig:forecast_hw}Wykres prognozy modelu H-W"}
+plot(hw_fc, main = "Prognoza Holt-Winters", xlab = "Rok", ylab = "Indeks")
+```
+
+```{r, fig.cap="\\label{fig:forecast_ets}Wykres prognozy modelu TSLM"}
+plot(tslm_fc,   main = "Prognoza TSLM",   xlab = "Rok", ylab = "Indeks")
+
+
+par(mfrow = c(1, 1))
+```
+
+
+
+## Przedstawienie skonstruowanych prognoz na wykresie i porównanie z wartościami rzeczywistymi
+
+Spójrzmy jak wygenerowane prognozy sprawdzają sie z rzeczywistymi danymi.
+
+```{r porownanie, fig.cap="\\label{fig:porownanie}Porównanie prognoz do wartości rzeczywistych"}
+
+autoplot(train.retail) +
+  autolayer(test.retail, series = "Dane rzeczywiste (Test)", color = "black", lwd = 0.7) +
+  autolayer(sarima_fc, series = "SARIMA", PI = FALSE) +
+  autolayer(snaive_fc, series = "SNAIVE (Benchmark)", PI = FALSE)+
+  autolayer(ets_fc, series = "ETS", PI = FALSE) +
+  autolayer(hw_fc, series = "Holt Winters", PI = FALSE, linetype = "dashed") +
+  autolayer(tslm_fc, series = "TSLM", PI = FALSE) +
+  ggtitle("Porównanie wszystkich prognoz z danymi rzeczywistymi") +
+  scale_color_brewer(palette = "Set1") +
+  xlab("Rok") + ylab("Indeks handlu") +
+  guides(colour = guide_legend(title = "Model")) +
+  theme_minimal()
+```
+
+
+Mimo przeprowadzenia rygorystycznej procedury doboru parametrów i pozytywnej diagnostyki reszt, model SARIMA okazał się mniej odporny na zmianę strukturalną trendu (kryzys finansowy) niż model ETS i równoważny mu Holt-Winters. Wynika to z charakterystyki wygładzania wykładniczego, które szybciej adaptuje się do lokalnych zmian poziomu szeregu. Co więcej nawet metoda naiwna zdaje się lepiej prognozować spadek niż SARIMA. Podejściem, które poradziło sobie zdecydowanie najgorzej, jest model TSLM – ze względu na swoją sztywną strukturę liniową nie był on w stanie wychwycić gwałtownego załamania trendu wzrostowego.
+
+## Porównanie dokładności prognoz dla zbioru testowego i uczącego
+
+Przyjrzyjmy się miarom dokładności prognoz dla zbioru uczącego i testowego.
+
+```{r, dokladnosc}
+tslm_fitted_org <- InvBoxCox(fitted(fit_tslm2), lambda = lambda.bc)
+tslm <- fc_tslm2
+tslm$fitted <- tslm_fitted_org
+
+lista_fc <- list(
+  SARIMA = sarima_fc,
+  ETS = ets_fc,
+  "Holt-Winters" = hw_fc,
+  TSLM = tslm,
+  SNAIVE = snaive_fc
+)
+
+tab_test <- do.call(rbind, lapply(lista_fc, function(x) accuracy(x, test.retail)["Test set", c("RMSE", "MAE", "MAPE", "MASE")]))
+
+tab_train <- do.call(rbind, lapply(lista_fc, function(x) accuracy(x)["Training set", c("RMSE", "MAE", "MAPE", "MASE")]))
+
+kable(tab_train, digits = 2, caption = "Błędy dopasowania na zbiorze uczącym") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+kable(tab_test, digits = 2, caption = "Dokładność prognoz na zbiorze testowym (h=12)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Wnioski
+
+Na podstawie przeprowadzonej analizy oraz uzyskanych miar dokładności prognoz dla zbioru uczącego i testowego możemy wyciągnąć następujące wnioski:
+
+* Zwycięzca analizy: Za optymalny model dla szeregu euretail uznajemy `ETS(A,A,A)`, który jest statystycznym odpowiednikiem addytywnej metody Holta-Wintersa. Model ten uzyskał najniższe błędy na zbiorze testowym (MAPE = 0,88%, RMSE = 0,97), co oznacza, że średnio mylił się o mniej niż 1% wartości indeksu. Model ten wykazuje się największą stabilnością – różnica między błędami na zbiorze uczącym (MAPE = 0,29%) a testowym (MAPE = 0,87-0,88%) jest relatywnie niewielka. Oznacza to, że model nie uległ przeuczeniu i zachował wysoką zdolność generalizacji.
+
+* Adaptacyjność ponad złożoność i sztywność: Modele wygładzania wykładniczego (`ETS`) okazały się znacznie lepsze od modeli regresyjnych (`TSLM`) i autoregresyjnych (`SARIMA`). Wynika to z faktu, że algorytm ETS nadaje większe wagi nowszym obserwacjom, przez co szybciej "zauważył" załamanie trendu wzrostowego po 2008 roku i dostosował do niego prognozę.
+
+* Problemy modelu SARIMA: Mimo poprawnej specyfikacji i przejścia testów diagnostycznych reszt, model `SARIMA(0,1,0)(0,1,1)[4]` zbyt mocno zasugerował się historycznymi wzrostami. W efekcie jego prognoza była zbyt optymistyczna względem rzeczywistych danych, co skutkowało dużym błędem MAPE na poziomie 4,55%. Analiza porównawcza błędów również ujawnia istotny problem. Choć na zbiorze uczącym uzyskał on bardzo dobre wyniki (MAPE = 0,28%, poziom zbliżony do ETS), to na zbiorze testowym błąd ten drastycznie wzrósł do poziomu 4,55%. Sugeruje to, że model zbyt sztywno dopasował się do historycznego trendu wzrostowego (overfitting).
+
+* Nieadekwatność modelu TSLM: Model regresji liniowej okazał się najmniej użyteczny. Już na etapie diagnostyki test Breuscha-Godfreya wykazał silną autokorelację reszt (p<0,001), co oznacza, że model nie wyłapał wszystkich informacji z danych. Sztywne założenie o liniowym trendzie doprowadziło do całkowitego rozminięcia się prognozy z rzeczywistością (MAPE = 7,83%).
+
+* Rola benchmarku: Warto zauważyć, że w warunkach gwałtownej zmiany trendu, prosta metoda sezonowa naiwna (SNAIVE) poradziła sobie lepiej niż zaawansowany TSLM czy SARIMA. Potwierdza to, że przy dużej niestabilności szeregu, proste metody bazujące na ostatnim znanym cyklu sezonowym mogą być bezpieczniejszym punktem odniesienia. Jednakże nie oznacza to, że prognozy metody naiwnej były skuteczne.
+
+**Podsumowanie**: Dla rozważanego szeregu czasowego najbardziej adekwatne jest podejście oparte na wygładzaniu wykładniczym (`ETS`). Pozwala ono na zachowanie balansu między stabilną sezonowością a elastycznym reagowaniem na nagłe zmiany poziomu indeksu, co w przypadku danych gospodarczych o dużej zmienności jest kluczowe. Model ten jako jedyny skutecznie połączył bardzo dobre dopasowanie do danych historycznych z realną zdolnością prognozowania w warunkach zmiany trendu, unikając przy tym negatywnych skutków przeuczenia.
